@@ -881,12 +881,43 @@ static void bar_draw(u32 *fb) {
 
 /* What is running and how fast, on top of the picture. F8. */
 static char stats[3][40];
+/* Painted once a second into its own little picture, in a 3x5 font, and copied
+ * over each frame: the frame budget has no room for blending text. */
+enum { STATS_W = 40 * 4 + 3, STATS_H = 3 * 6 + 3 };
+static u32 stats_px[STATS_H][STATS_W];
+static int stats_w;
+
+static const u8 *tiny_glyph(char c) {
+    static const char *const names = "0123456789ACDEFGILMNOPRSUVW%";
+    static const u8 rows[][5] = {
+        {7,5,5,5,7},{2,6,2,2,7},{7,1,7,4,7},{7,1,3,1,7},{5,5,7,1,1},{7,4,7,1,7},{7,4,7,5,7},{7,1,1,1,1},{7,5,7,5,7},{7,5,7,1,7},
+        {2,5,7,5,5},{3,4,4,4,3},{6,5,5,5,6},{7,4,6,4,7},{7,4,6,4,4},{3,4,5,5,3},{7,2,2,2,7},{4,4,4,4,7},{5,7,7,5,5},{6,5,5,5,5},
+        {7,5,5,5,7},{7,5,7,4,4},{6,5,6,5,5},{3,4,2,1,6},{5,5,5,5,7},{5,5,5,5,2},{5,5,7,7,5},{5,1,2,4,5},
+    };
+    const char *f = c ? strchr(names, c) : NULL;
+    return f ? rows[f - names] : NULL;
+}
+
+static void stats_render(void) {
+    int len = 0;
+    for (int i = 0; i < 3; i++) { const int n = (int)strlen(stats[i]); if (n > len) len = n; }
+    stats_w = len * 4 + 3;
+    memset(stats_px, 0, sizeof stats_px);
+    for (int l = 0; l < 3; l++)
+        for (int i = 0; stats[l][i]; i++) {
+            const u8 *g = tiny_glyph(stats[l][i]);
+            if (!g) continue;
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 3; x++)
+                    if (g[y] >> (2 - x) & 1) stats_px[2 + l * 6 + y][2 + i * 4 + x] = 0xFFFFFF;
+        }
+}
+
 static void stats_draw(u32 *fb) {
-    const int w = vdp_screen_w, h = vdp_screen_h;
-    int tw = 0;
-    for (int i = 0; i < 3; i++) { const int n = fx_text_width(stats[i], 1); if (n > tw) tw = n; }
-    fx_box(fb, VDP_FB_STRIDE, w, h, 4, 4, 12 + tw, 4 + 34, 0, 0.66f);
-    for (int i = 0; i < 3; i++) fx_text(fb, VDP_FB_STRIDE, w, h, stats[i], 8, 8 + i * 10, 1, 0xFFFFFF, 0xFFFFFF);
+    int w = stats_w;
+    if (!w) return;
+    if (w > vdp_screen_w - 2) w = vdp_screen_w - 2;
+    for (int y = 0; y < STATS_H; y++) memcpy(fb + (y + 2) * VDP_FB_STRIDE + 2, stats_px[y], (size_t)w * 4);
 }
 
 /* ------------------------------------------------------- game selector
@@ -1244,6 +1275,7 @@ int main(void) {
                     if (snes_game) snprintf(stats[2], sizeof stats[2], "CPU %d PPU %d APU %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)(t_ym / p), (int)(t_vid / p));
                     else snprintf(stats[2], sizeof stats[2], "CPU %d VDP %d SND %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)((t_ym + t_z80) / p), (int)(t_vid / p));
                     snes_native_cycles = snes_interp_cycles = m68k_native_cycles = m68k_interp_cycles = 0;
+                    stats_render();
                 }
                 t_68k = t_z80 = t_vdp = t_ym = 0;
             }
