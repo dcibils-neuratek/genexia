@@ -71,11 +71,13 @@ class Vnc:
     def frame(self):
         """The server answers in tiles, a few at a time: ask until they cover the screen."""
         fb = bytearray(self.w * self.h * 4)
-        seen = set()
+        seen = bytearray(self.w * self.h)
         for _ in range(400):
             self.s.sendall(struct.pack('>BBHHHH', 3, 0, 0, 0, self.w, self.h))
-            seen.update(self.update(fb))
-            if sum(r[2] * r[3] for r in seen) >= self.w * self.h:
+            for x, y, w, h in self.update(fb):
+                for r in range(y, y + h):
+                    seen[r * self.w + x:r * self.w + x + w] = b'\1' * w
+            if all(seen):
                 break
         return bytes(fb)
 
