@@ -22,7 +22,8 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES and N
 | `src/core/` | Shared front end: window, filters, menu, input, audio output, pacing, run-ahead, save states, and the `Backend` interface (`backend.h`) |
 | `src/chips/` | Reusable chips with no console knowledge: 68000, Z80, 65C816, YM2612, PSG, R4300i, RSP, RDP. Each talks to the machine through callbacks, so a new console reuses them directly |
 | `src/backends/<console>/` | Only what is unique to one console: memory map, video chip, wiring, frame timing |
-| `tools/` | Recompiler pipeline: `recompile.py` (68000), `recompile_65816.py` (65C816, per address and M/X mode) |
+| `tools/` | Recompiler pipeline: `recompile.py` (68000), `recompile_65816.py` (65C816, per address and M/X mode), `recompile_mips.py` (N64) |
+| `recomps/<console>/<game>/` | One folder per recompiled game: generated C and its `coverage.txt` |
 
 Every emulated variable is tagged `EMU_STATE`, which is why save states and
 run-ahead work on every backend without per-chip code.
@@ -39,6 +40,64 @@ is kept only as a safety net for code the recompiler never found. In the final
 verification rounds it was never needed: 20 headless sessions of about 25 minutes
 each, covering menus, character select and fights.
 
+## Recompiled vs emulated
+
+A console game is machine code for a CPU the Mac doesn't have. There are two ways
+to run it, and Genexia uses both.
+
+**Interpreted (emulated).** A loop in C reads one console instruction at a time,
+works out what it means, and does it. The decoding is repeated every time the
+instruction runs, even in a loop that runs a million times. It works for any ROM
+straight away, with no preparation.
+
+**Recompiled.** Before the game runs, a tool translates its machine code into C
+once, and clang compiles that into native Mac code. The decoding work is gone at
+run time, because the Mac simply executes the translated code.
+
+| | Interpreted | Recompiled |
+|---|---|---|
+| Which games | Any ROM | Only games prepared in `recomps/` |
+| Preparation | None | Run the recompiler for that exact ROM, then compile |
+| CPU code | Decoded while playing | Native Mac code |
+| Speed | Slower | Faster: Super Mario 64 runs 1.8x faster overall |
+| Forcing it | `--interp` | The default when a recompile exists |
+
+Only the game's **CPU code** is recompiled. The rest of the console is still
+reimplemented in C either way: video, sound, controllers and, on N64, the RSP and
+RDP. So a recompiled game still needs Genexia's backends, and it still needs its ROM
+for graphics and sound data. It is also why the speed gain has a ceiling, since
+much of the N64's time goes to those chips.
+
+The two also work together. Code the recompiler never saw, or anything unusual
+such as a hardware register access on N64, falls back to the interpreter, so a
+game keeps working even with partial coverage.
+
+### What the `recomp_*.c` files are
+
+They are the game's own program, translated. Each C function is one **block**: a
+short run of the game's instructions, ending at a jump. A single instruction like
+`addiu t2, t2, 8` becomes one line such as `gpr[10] = gpr[10] + 8;`, where `gpr`
+holds the console CPU's registers. At the end of a block, the code moves on to the
+block the game would have jumped to.
+
+There are so many because a game is a lot of code: tens of thousands of blocks.
+
+| Game | Files | Size |
+|---|---|---|
+| Street Fighter II | 13 | 6 MB |
+| Ultimate Mortal Kombat 3 | 14 | 10 MB |
+| Super Mario Kart | 8 | 3 MB |
+| Super Mario 64 | 22 | 96 MB (62,000 blocks) |
+
+Splitting them across numbered files means nothing except keeping each one a
+reasonable size, so clang can compile them in parallel. `recomp_register.c` is the
+index: it tells Genexia which function belongs to which console address. Each
+game's `coverage.txt` lists the addresses the recompiler should start from, which
+are found by playing the game.
+
+These files are generated, so never edit them by hand. They contain the game's
+code, so they aren't committed: `make recompile-*` recreates them from your own ROM.
+
 ## Getting started from a fresh clone
 
 This repository contains no game data: no ROMs, recompiled game code or
@@ -46,7 +105,7 @@ disassemblies. Bring your own legally obtained ROMs. Put the SF2 ROM in the
 project folder and any others in `roms/`, then generate the game code once:
 
 ```bash
-make recompile && make recompile-umk3 && make recompile-smk
+make recompile && make recompile-umk3 && make recompile-smk && make recompile-sm64
 ```
 
 ## Build & run
