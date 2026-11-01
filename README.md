@@ -363,7 +363,7 @@ through InputSprocket. Both are loaded from the system at run time.
 
 The title bar shows the frame rate, and `genexia.log` beside the app records it every
 second. `make os9-push` sends a build to a machine with File Sharing and guest access
-on, and `make os9-log` reads its log.
+on, and `make os9-log` reads its log. `tools/os9_vnc.py` looks at and drives a Mac running a VNC server with no password, such as OS9vnc.
 
 Every build has a number: the commit count and commit, with `+` when it was
 built from uncommitted code. It is in the window title, at the top right of the
