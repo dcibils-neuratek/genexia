@@ -109,12 +109,12 @@ static int s_irq_pending N64_STATE;
 static int s_host_rm;                  /* host side, not emulated state */
 
 /* ------------------------------------------------------------ memory helpers */
-static inline u16 rd16(const u8 *p) { u16 v; memcpy(&v, p, 2); return __builtin_bswap16(v); }
-static inline u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return __builtin_bswap32(v); }
-static inline u64 rd64(const u8 *p) { u64 v; memcpy(&v, p, 8); return __builtin_bswap64(v); }
-static inline void wr16(u8 *p, u16 x) { x = __builtin_bswap16(x); memcpy(p, &x, 2); }
-static inline void wr32(u8 *p, u32 x) { x = __builtin_bswap32(x); memcpy(p, &x, 4); }
-static inline void wr64(u8 *p, u64 x) { x = __builtin_bswap64(x); memcpy(p, &x, 8); }
+static inline u16 rd16(const u8 *p) { u16 v; memcpy(&v, p, 2); return R4_BE16(v); }
+static inline u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return R4_BE32(v); }
+static inline u64 rd64(const u8 *p) { u64 v; memcpy(&v, p, 8); return R4_BE64(v); }
+static inline void wr16(u8 *p, u16 x) { x = R4_BE16(x); memcpy(p, &x, 2); }
+static inline void wr32(u8 *p, u32 x) { x = R4_BE32(x); memcpy(p, &x, 4); }
+static inline void wr64(u8 *p, u64 x) { x = R4_BE64(x); memcpy(p, &x, 8); }
 
 static inline u32 mem_r32(u32 pa) { return pa < N64_RDRAM_SIZE ? rd32(n64_rdram + pa) : n64_read32(pa); }
 static inline u64 mem_r64(u32 pa) { return pa < N64_RDRAM_SIZE ? rd64(n64_rdram + pa) : n64_read64(pa); }
@@ -626,6 +626,26 @@ void r4300_recomp_add(u32 pc, R4Block fn, const u32 *words, u32 n) {
     rec_head[i] = ++rec_n;
 }
 
+#ifdef GENEXIA_OS9
+long long r4300_native_cycles, r4300_interp_cycles;
+
+/* These chips have no fsqrt: the estimate instruction and Newton's steps. */
+double r4_sqrt(double x) {
+    if (!(x > 0) || x > 1.7e308) return x == 0 || x > 0 ? x : __builtin_nan("");
+    double y;
+    __asm__("frsqrte %0,%1" : "=f"(y) : "f"(x));
+    for (int i = 0; i < 4; i++) y = y * (1.5 - 0.5 * x * y * y);
+    return x * y;
+}
+float r4_sqrtf(float x) {
+    if (!(x > 0) || x > 3.4e38f) return x == 0 || x > 0 ? x : __builtin_nanf("");
+    double d = x, y;
+    __asm__("frsqrte %0,%1" : "=f"(y) : "f"(d));
+    for (int i = 0; i < 3; i++) y = y * (1.5 - 0.5 * d * y * y);
+    return (float)(d * y);
+}
+#endif
+
 void r4300_compact_add(const R4Compact *t, unsigned n) {
     for (unsigned i = 0; i < n; i++) r4300_recomp_add(t[i].pc, t[i].fn, t[i].words, t[i].n);
 }
@@ -917,6 +937,9 @@ static int lk_run(R4Block fn, u32 pc, int used) {
 #endif
 
 int r4300_run(int cycles) {
+#ifdef GENEXIA_OS9
+    int cycles_seen = 0;
+#endif
     u64 *const gpr = r4300_gpr;
     u32 *const cop0 = r4300_cop0;
     u8 *const ram = n64_rdram;
@@ -971,7 +994,15 @@ int r4300_run(int cycles) {
 #ifdef R4_LOCKSTEP
                     used = lk_run(fn, pc, used);
 #else
+#ifdef GENEXIA_OS9
+                    r4300_interp_cycles += used - cycles_seen;
+                    cycles_seen = used;
+#endif
                     used = fn(used);
+#ifdef GENEXIA_OS9
+                    r4300_native_cycles += used - cycles_seen;
+                    cycles_seen = used;
+#endif
 #endif
                     pc = r4_pc;
                     npc = pc + 4;
@@ -1088,16 +1119,12 @@ int r4300_run(int cycles) {
                 break;
             }
             case 28: {
-                __int128 r = (__int128)(s64)gpr[RS] * (s64)gpr[RT];
-                s_lo = (u64)r;
-                s_hi = (u64)(r >> 64);
+                r4_dmult((s64)gpr[RS], (s64)gpr[RT]);
                 used += COST_DMULT;
                 break;
             }
             case 29: {
-                unsigned __int128 r = (unsigned __int128)gpr[RS] * gpr[RT];
-                s_lo = (u64)r;
-                s_hi = (u64)(r >> 64);
+                r4_dmultu(gpr[RS], gpr[RT]);
                 used += COST_DMULT;
                 break;
             }
@@ -1130,14 +1157,14 @@ int r4300_run(int cycles) {
             }
             case 32: {
                 s32 r;
-                if (unlikely(__builtin_sadd_overflow((s32)gpr[RS], (s32)gpr[RT], &r))) goto ex_ov;
+                if (unlikely(__builtin_add_overflow((s32)gpr[RS], (s32)gpr[RT], &r))) goto ex_ov;
                 gpr[RD] = SX32(r);
                 break;
             }
             case 33: gpr[RD] = SX32((u32)gpr[RS] + (u32)gpr[RT]); break;
             case 34: {
                 s32 r;
-                if (unlikely(__builtin_ssub_overflow((s32)gpr[RS], (s32)gpr[RT], &r))) goto ex_ov;
+                if (unlikely(__builtin_sub_overflow((s32)gpr[RS], (s32)gpr[RT], &r))) goto ex_ov;
                 gpr[RD] = SX32(r);
                 break;
             }
@@ -1212,7 +1239,7 @@ int r4300_run(int cycles) {
         case 7:  BRANCH((s64)gpr[RS] > 0); break;
         case 8: {
             s32 r;
-            if (unlikely(__builtin_sadd_overflow((s32)gpr[RS], (s32)(s16)inst, &r))) goto ex_ov;
+            if (unlikely(__builtin_add_overflow((s32)gpr[RS], (s32)(s16)inst, &r))) goto ex_ov;
             gpr[RT] = SX32(r);
             break;
         }

@@ -39,7 +39,7 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: FORCE os9 os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
+.PHONY: FORCE os9 os9-n64bench os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
 
 all: genexia
 
@@ -162,6 +162,11 @@ os9: $(BUILD)/version.h
 IMAC ?= 192.168.1.38
 os9-push: os9
 	python3 tools/os9_share.py $(IMAC) push $(BUILD)/os9/Genexia.bin "Genexia $(BUILD_NO)"
+# Times Mario 64's game code on the iMac; needs recompile-sm64c first.
+os9-n64bench: $(BUILD)/version.h
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake -S tools/os9_n64bench -B $(BUILD)/os9/n64bench \
+	  -DCMAKE_TOOLCHAIN_FILE=$(RETRO68)/toolchain/powerpc-apple-macos/cmake/retroppc.toolchain.cmake -DCMAKE_BUILD_TYPE=Release
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake --build $(BUILD)/os9/n64bench -- -j8
 os9-log:
 	@python3 tools/os9_share.py $(IMAC) get genexia.log
 

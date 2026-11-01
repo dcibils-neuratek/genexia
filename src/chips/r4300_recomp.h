@@ -41,12 +41,21 @@ void r4300_recomp_print(void);
 
 #define FC_CLEAR (s_fcr31 &= ~0x3F000u)
 
-static inline u16 r4_rd16(const u8 *p) { u16 v; memcpy(&v, p, 2); return __builtin_bswap16(v); }
-static inline u32 r4_rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return __builtin_bswap32(v); }
-static inline u64 r4_rd64(const u8 *p) { u64 v; memcpy(&v, p, 8); return __builtin_bswap64(v); }
-static inline void r4_wr16(u8 *p, u16 x) { x = __builtin_bswap16(x); memcpy(p, &x, 2); }
-static inline void r4_wr32(u8 *p, u32 x) { x = __builtin_bswap32(x); memcpy(p, &x, 4); }
-static inline void r4_wr64(u8 *p, u64 x) { x = __builtin_bswap64(x); memcpy(p, &x, 8); }
+#ifdef __BIG_ENDIAN__
+#define R4_BE16(x) (x)
+#define R4_BE32(x) (x)
+#define R4_BE64(x) (x)
+#else
+#define R4_BE16 __builtin_bswap16
+#define R4_BE32 __builtin_bswap32
+#define R4_BE64 __builtin_bswap64
+#endif
+static inline u16 r4_rd16(const u8 *p) { u16 v; memcpy(&v, p, 2); return R4_BE16(v); }
+static inline u32 r4_rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return R4_BE32(v); }
+static inline u64 r4_rd64(const u8 *p) { u64 v; memcpy(&v, p, 8); return R4_BE64(v); }
+static inline void r4_wr16(u8 *p, u16 x) { x = R4_BE16(x); memcpy(p, &x, 2); }
+static inline void r4_wr32(u8 *p, u32 x) { x = R4_BE32(x); memcpy(p, &x, 4); }
+static inline void r4_wr64(u8 *p, u64 x) { x = R4_BE64(x); memcpy(p, &x, 8); }
 
 static inline u64 r4_fgl(int i) { return (u64)s_fpw[i + 1] << 32 | s_fpw[i]; }
 static inline void r4_fsl(int i, u64 v) { s_fpw[i] = (u32)v; s_fpw[i + 1] = (u32)(v >> 32); }
@@ -96,8 +105,16 @@ static inline void r4_divu(u32 n, u32 d) {
     if (d == 0) { s_lo = ~0ull; s_hi = SX(n); }
     else { s_lo = SX(n / d); s_hi = SX(n % d); }
 }
-static inline void r4_dmult(s64 a, s64 b) { __int128 r = (__int128)a * b; s_lo = (u64)r; s_hi = (u64)(r >> 64); }
-static inline void r4_dmultu(u64 a, u64 b) { unsigned __int128 r = (unsigned __int128)a * b; s_lo = (u64)r; s_hi = (u64)(r >> 64); }
+static inline void r4_dmultu(u64 a, u64 b) {
+    const u64 ll = (u64)(u32)a * (u32)b, lh = (u64)(u32)a * (b >> 32), hl = (a >> 32) * (u32)b;
+    const u64 mid = (ll >> 32) + (u32)lh + (u32)hl;
+    s_lo = a * b;
+    s_hi = (a >> 32) * (b >> 32) + (lh >> 32) + (hl >> 32) + (mid >> 32);
+}
+static inline void r4_dmult(s64 a, s64 b) {
+    r4_dmultu((u64)a, (u64)b);
+    s_hi -= (a < 0 ? (u64)b : 0) + (b < 0 ? (u64)a : 0);
+}
 static inline void r4_ddiv(s64 n, s64 d) {
     if (d == 0) { s_lo = n < 0 ? 1 : ~0ull; s_hi = (u64)n; }
     else if (d == -1) { s_lo = 0 - (u64)n; s_hi = 0; }

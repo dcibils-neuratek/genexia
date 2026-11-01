@@ -161,10 +161,25 @@ static void wide_frame(void) {
     rdp_wide_frame(wide_3d);
 }
 
+#ifdef N64_BENCH
+/* For timing the game alone: RSP tasks take no time and do nothing. */
+static int bench_task;
+static void bench_finish(void) {
+    sp_status |= SP_HALT | SP_BROKE | 0x200;      /* signal 2: task done */
+    if (sp_status & SP_INTR_BREAK) mi_raise(MI_SP);
+    if (R32(&n64_sp_mem[0xFC0]) == 1) mi_raise(MI_DP);
+}
+#endif
+
 static void sp_status_write(u32 v) {
     if ((v & 1) && n64_dl_log) sp_task_debug();
+#ifndef N64_BENCH
     if (v & 1) wide_frame();
+#endif
     if (v & 1) { sp_status &= ~(u32)SP_HALT; st_sp_start++; }
+#ifdef N64_BENCH
+    if (v & 1) bench_task = 800;
+#endif
     if (v & 2) sp_status |= SP_HALT;
     if (v & 4) sp_status &= ~(u32)SP_BROKE;
     if (v & 8) mi_clear(MI_SP);
@@ -537,12 +552,18 @@ void n64_run_frame(void) {
         int rem = CYCLES_PER_LINE;
         while (rem > 0) {
             int used = r4300_run(rem < SLICE ? rem : SLICE);
+#ifdef N64_BENCH
+            if (bench_task > 0 && (bench_task -= used) <= 0) bench_finish();
+#else
             if (!n64_sp_halted()) rsp_run(used * 2 / 3 + 1);
+#endif
             ai_step(used);
             rem -= used;
         }
     }
+#ifndef N64_BENCH
     vi_output();
+#endif
 }
 
 /* ---------------------------------------------------------------- boot */
