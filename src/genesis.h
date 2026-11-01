@@ -71,6 +71,7 @@ extern int vdp_widescreen;
 extern int vdp_altivec;                 /* the machine has it: see vdp_altivec.c */
 extern unsigned vdp_altivec_lines;
 void vdp_compose_altivec(u8 *out, const u8 *A, const u8 *B, const u8 *S, int n);
+void vdp_compose_shadow_altivec(u8 *out, u8 *bank, const u8 *A, const u8 *B, const u8 *S, int n);
 #endif
 extern int vdp_native_w;                /* 256 or 320: the game's own view width */
 extern int vdp_view_x;                  /* where game x=0 lands in the output line */

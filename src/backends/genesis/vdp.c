@@ -741,9 +741,11 @@ static void render_line(int line)
     memset(fm, 0, (size_t)width);
     #define FXMARK(x, s) do { int pl_ = ((s) >> 4) & 3; if (pl_ >= 2) fm[x] = (u8)(pl_ - 1); } while (0)
 #endif
+#ifdef GENEXIA_OS9
+    static u8 mixed[MAXW] __attribute__((aligned(16))), bank[MAXW] __attribute__((aligned(16)));
+#endif
     if (!(regs[12] & 0x08)) {
 #ifdef GENEXIA_OS9
-        static u8 mixed[MAXW] __attribute__((aligned(16)));
         if (vdp_altivec && !x0 && !(((size_t)A | (size_t)B | (size_t)S | (size_t)mixed) & 15)) {
             vdp_compose_altivec(mixed, A, B, S, x1);
             const u32 saved = pal_n[0];
@@ -769,6 +771,18 @@ static void render_line(int line)
     }
 
     /* shadow / highlight */
+#ifdef GENEXIA_OS9
+    if (vdp_altivec && !x0 && !(((size_t)A | (size_t)B | (size_t)S | (size_t)mixed | (size_t)bank) & 15)) {
+        u32 *const pals[3] = { pal_n, pal_s, pal_h };
+        u32 saved[3];
+        vdp_compose_shadow_altivec(mixed, bank, A, B, S, x1);
+        for (int i = 0; i < 3; i++) { saved[i] = pals[i][0]; pals[i][0] = pals[i][bd]; }
+        for (int x = 0; x < x1; x++) out[x] = pals[bank[x]][mixed[x]];
+        for (int i = 0; i < 3; i++) pals[i][0] = saved[i];
+        vdp_altivec_lines++;
+        return;
+    }
+#endif
     for (int x = x0; x < x1; x++) {
         u8 a = A[x], b = B[x], s = S[x];
         int shadow = !((a | b) & 0x80);
