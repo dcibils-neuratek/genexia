@@ -17,7 +17,7 @@ CFLAGS   := -O2 -std=c11 -Wall -Wextra -Wno-unused-variable -Wno-unused-paramete
 GENFLAGS := -O1 -std=c11 -w $(INCS)
 BUILD    := build
 
-RUNTIME  := src/core/main.c src/core/state.c \
+RUNTIME  := src/core/main.c src/core/state.c src/core/enhance.c \
             src/chips/m68k_core.c src/chips/m68k_interp.c src/chips/z80.c \
             src/chips/ym2612.c src/chips/psg.c \
             src/backends/genesis/bus.c src/backends/genesis/vdp.c \

@@ -15,6 +15,7 @@
  */
 #include "n64.h"
 #include <stdio.h>
+#include <stdlib.h>
 int rdp_debug;
 #include <string.h>
 
@@ -65,6 +66,15 @@ typedef struct {
 static RdpState S N64_STATE;
 /* The two extra bits per 16-bit RDRAM word (coverage or low dz bits). */
 static u8 hidden[N64_RDRAM_SIZE / 2] N64_STATE;
+
+/* Enhancement: high-resolution rendering. Every draw runs twice. The first run
+ * is the real one, into RDRAM, so the game sees exactly what the console would
+ * produce. The second is the same draw scaled up by hr_n into a host buffer
+ * that is not emulated state; S is put back afterwards, so nothing the game can
+ * observe changes. These pointers select which memory the pixel code touches. */
+static u8 *R_ram = n64_rdram, *R_hid = hidden;
+static u32 R_mask = AMASK;
+static int hr_n = 1;               /* scale of the draw running now */
 
 /* ---------------------------------------------------- derived pipeline state */
 typedef void (*SampleFn)(const Tile *, s32, s32, Col *);
@@ -385,7 +395,7 @@ ALWAYS void span_core(const Span *sp, const int two, const int texm, const int z
         }
 
         /* Z first: cheap, and a reject skips the whole colour pipeline */
-        u32 sz = 0, zidx = (za & AMASK & ~1u);
+        u32 sz = 0, zidx = (za & R_mask & ~1u);
         int infront = 1, nearer = 1, farther = 1, zmax = 0;
         if (zb) {
             if (P.zsel) sz = P.zprim;
@@ -398,9 +408,9 @@ ALWAYS void span_core(const Span *sp, const int two, const int texm, const int z
                 }
             }
             if (M.z_compare) {
-                u32 zv = be16(&n64_rdram[zidx]);
+                u32 zv = be16(&R_ram[zidx]);
                 u32 oz = z_decompress(zv >> 2);
-                int raw = (int)((zv & 3) << 2 | hidden[zidx >> 1]);
+                int raw = (int)((zv & 3) << 2 | R_hid[zidx >> 1]);
                 int dzmem = 1 << raw, force = 0, prec = (int)(zv >> 13);
                 if (M.special) {
                     int d = P.dzenc - raw;
@@ -505,22 +515,22 @@ ALWAYS void span_core(const Span *sp, const int two, const int texm, const int z
         }
 
         /* memory read */
-        u32 fidx = fa & AMASK & (fb16 ? ~1u : ~0u);
+        u32 fidx = fa & R_mask & (fb16 ? ~1u : ~0u);
         int memcvg = 7;
         if (M.mem_always || cvg < 8) {
             if (fb16) {
-                u32 fv = be16(&n64_rdram[fidx]);
+                u32 fv = be16(&R_ram[fidx]);
                 c_mem.v = (v4){(s32)(fv >> 8) & 0xF8, (s32)(fv >> 3) & 0xF8, (s32)(fv << 2) & 0xF8, 0xE0};
                 if (M.image_read) {
-                    memcvg = (int)((fv & 1) << 2 | hidden[fidx >> 1]);
+                    memcvg = (int)((fv & 1) << 2 | R_hid[fidx >> 1]);
                     c_mem.c[3] = memcvg << 5;
                 }
             } else if (bpp == 4) {
-                const u8 *p = &n64_rdram[fidx & ~3u];
+                const u8 *p = &R_ram[fidx & ~3u];
                 c_mem.v = (v4){p[0], p[1], p[2], 0xE0};
                 if (M.image_read) { c_mem.c[3] = p[3]; memcvg = p[3] >> 5; }
             } else {
-                int v = n64_rdram[fidx];
+                int v = R_ram[fidx];
                 c_mem.v = (v4){v, v, v, 0xE0};
             }
         }
@@ -571,17 +581,17 @@ ALWAYS void span_core(const Span *sp, const int two, const int texm, const int z
         Col oc; oc.v = out;
         if (fb16) {
             u32 r = (u32)oc.c[0], g = (u32)oc.c[1], b = (u32)oc.c[2];
-            wbe16(&n64_rdram[fidx], (u16)(((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | ((u32)fc >> 2)));
-            hidden[fidx >> 1] = (u8)(fc & 3);
+            wbe16(&R_ram[fidx], (u16)(((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | ((u32)fc >> 2)));
+            R_hid[fidx >> 1] = (u8)(fc & 3);
         } else if (bpp == 4) {
-            u8 *p = &n64_rdram[fidx & ~3u];
+            u8 *p = &R_ram[fidx & ~3u];
             p[0] = (u8)oc.c[0]; p[1] = (u8)oc.c[1]; p[2] = (u8)oc.c[2]; p[3] = (u8)(fc << 5);
         } else {
-            n64_rdram[fidx] = (u8)oc.c[0];
+            R_ram[fidx] = (u8)oc.c[0];
         }
         if (zb && M.z_update) {
-            wbe16(&n64_rdram[zidx], (u16)((z_compress(sz) << 2) | ((u32)P.dzenc >> 2)));
-            hidden[zidx >> 1] = (u8)(P.dzenc & 3);
+            wbe16(&R_ram[zidx], (u16)((z_compress(sz) << 2) | ((u32)P.dzenc >> 2)));
+            R_hid[zidx >> 1] = (u8)(P.dzenc & 3);
         }
     }
 }
@@ -826,8 +836,8 @@ static void draw_tri(const u64 *w, int shade, int tex, int zb) {
     int flip = (hi >> 23) & 1;
     prep((hi >> 16) & 7, (hi >> 19) & 7);
 
-    const s32 yl = sx(hi & 0x3FFF, 14), ym = sx(lo >> 16, 14), yh = sx(lo, 14);
-    const u32 xl = (u32)sx(HI(w[1]), 30), xh0 = (u32)sx(HI(w[2]), 30), xm0 = (u32)sx(HI(w[3]), 30);
+    s32 yl = sx(hi & 0x3FFF, 14), ym = sx(lo >> 16, 14), yh = sx(lo, 14);
+    u32 xl = (u32)sx(HI(w[1]), 30), xh0 = (u32)sx(HI(w[2]), 30), xm0 = (u32)sx(HI(w[3]), 30);
     const s32 dxl_s = sx(LO(w[1]), 30), dxh_s = sx(LO(w[2]), 30), dxm_s = sx(LO(w[3]), 30);
     const u32 dxl = (u32)((dxl_s >> 2) & ~1), dxh = (u32)((dxh_s >> 2) & ~1), dxm = (u32)((dxm_s >> 2) & ~1);
 
@@ -858,6 +868,20 @@ static void draw_tri(const u64 *w, int shade, int tex, int zb) {
     if (zb) {
         z0 = HI(b[0]); dzdx = (s32)LO(b[0]);
         dzde = (s32)HI(b[1]); dzdy = (s32)LO(b[1]);
+    }
+    if (hr_n > 1) {
+        /* Edges keep their slopes when x and y scale together. Attribute steps
+         * shrink, and the start values move to the first high-res scanline. */
+        const int n = hr_n, e = ((yh * n) >> 2) - (yh >> 2) * n;
+        xh0 = xh0 * (u32)n + (u32)e * (u32)dxh_s;
+        xm0 = xm0 * (u32)n + (u32)e * (u32)dxm_s;
+        xl *= (u32)n; yl *= n; ym *= n; yh *= n;
+        P.drgba = P.drgba / v4s(n); de = de / v4s(n); dy = dy / v4s(n);
+        dsdx /= n; dtdx /= n; dwdx /= n; dzdx /= n;
+        dsde /= n; dtde /= n; dwde /= n; dzde /= n;
+        dsdy /= n; dtdy /= n; dwdy /= n; dzdy /= n;
+        v0 += de * e;
+        s0 += (u32)(dsde * e); t0 += (u32)(dtde * e); w0 += (u32)(dwde * e); z0 += (u32)(dzde * e);
     }
     P.ds = (u32)dsdx; P.dt = (u32)dtdx; P.dw = (u32)dwdx; P.dz = (u32)dzdx;
     P.dsy = (u32)dsdy; P.dty = (u32)dtdy; P.dwy = (u32)dwdy;
@@ -966,15 +990,15 @@ static void fill_mode_rect(int x0, int y0, int x1, int y1) {
         u32 a = S.fb_addr + ((u32)S.fb_width * (u32)y + (u32)x0) * step;
         for (int x = x0; x <= x1; x++, a += step) {
             if (step == 2) {
-                u32 m = a & AMASK & ~1u, up = !(a & 2);
-                wbe16(&n64_rdram[m], up ? hc : lc);
-                hidden[m >> 1] = up ? hh : lh;
+                u32 m = a & R_mask & ~1u, up = !(a & 2);
+                wbe16(&R_ram[m], up ? hc : lc);
+                R_hid[m >> 1] = up ? hh : lh;
             } else if (step == 4) {
-                u32 m = a & AMASK & ~3u;
-                n64_rdram[m] = (u8)(fill >> 24); n64_rdram[m + 1] = (u8)(fill >> 16);
-                n64_rdram[m + 2] = (u8)(fill >> 8); n64_rdram[m + 3] = (u8)fill;
+                u32 m = a & R_mask & ~3u;
+                R_ram[m] = (u8)(fill >> 24); R_ram[m + 1] = (u8)(fill >> 16);
+                R_ram[m + 2] = (u8)(fill >> 8); R_ram[m + 3] = (u8)fill;
             } else {
-                n64_rdram[a & AMASK] = (u8)(fill >> (8 * (3 - (a & 3))));
+                R_ram[a & R_mask] = (u8)(fill >> (8 * (3 - (a & 3))));
             }
         }
     }
@@ -990,19 +1014,19 @@ static void copy_line(int y, int x0, int x1, u32 s, u32 t, u32 ds, u32 dt) {
         int bit = c.c[3] >= 128;
         u32 m;
         if (is16) {
-            m = a & AMASK & ~1u; a += 2;
+            m = a & R_mask & ~1u; a += 2;
             if (acmp && !bit) continue;
             u32 v = ((u32)c.c[0] & 0xF8) << 8 | ((u32)c.c[1] & 0xF8) << 3 | ((u32)c.c[2] & 0xF8) >> 2 | (u32)bit;
-            wbe16(&n64_rdram[m], (u16)v);
-            hidden[m >> 1] = bit ? 3 : 0;
+            wbe16(&R_ram[m], (u16)v);
+            R_hid[m >> 1] = bit ? 3 : 0;
         } else if (S.fb_size == 3) {
-            m = a & AMASK & ~3u; a += 4;
+            m = a & R_mask & ~3u; a += 4;
             if (acmp && !bit) continue;
-            for (int i = 0; i < 4; i++) n64_rdram[m + (u32)i] = (u8)c.c[i];
+            for (int i = 0; i < 4; i++) R_ram[m + (u32)i] = (u8)c.c[i];
         } else {
-            m = a & AMASK; a += 1;
+            m = a & R_mask; a += 1;
             if (acmp && !bit) continue;
-            n64_rdram[m] = (u8)c.c[0];
+            R_ram[m] = (u8)c.c[0];
         }
     }
 }
@@ -1022,6 +1046,8 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
     if (y0 < cy0) y0 = cy0;
     if (y1 > cy1) y1 = cy1;
     if (x0 > x1 || y0 > y1) return;
+    const int nx0 = x0, ny0 = y0, n = hr_n;
+    if (n > 1) { x0 *= n; y0 *= n; x1 = (x1 + 1) * n - 1; y1 = (y1 + 1) * n - 1; }
 
     if (M.cycle == 3) { fill_mode_rect(x0, y0, x1, y1); return; }
 
@@ -1030,9 +1056,10 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
     s32 dsx = flip ? 0 : dxa, dtx = flip ? dya : 0, dsy = flip ? dxa : 0, dty = flip ? 0 : dya;
     if (M.cycle == 2) { dsx /= 4; dtx /= 4; }
     /* the plane starts at the (possibly fractional) left edge, top scanline */
-    s32 xq = (x0 << 2) - xh;
-    u32 sl = sb + (u32)(((s64)dsx * xq) >> 2) + (u32)(y0 - (yh >> 2)) * (u32)dsy;
-    u32 tl = tb + (u32)(((s64)dtx * xq) >> 2) + (u32)(y0 - (yh >> 2)) * (u32)dty;
+    s32 xq = (nx0 << 2) - xh;
+    u32 sl = sb + (u32)(((s64)dsx * xq) >> 2) + (u32)(ny0 - (yh >> 2)) * (u32)dsy;
+    u32 tl = tb + (u32)(((s64)dtx * xq) >> 2) + (u32)(ny0 - (yh >> 2)) * (u32)dty;
+    dsx /= n; dtx /= n; dsy /= n; dty /= n;
 
     if (M.cycle == 2) {
         for (int y = y0; y <= y1; y++, sl += (u32)dsy, tl += (u32)dty) {
@@ -1151,12 +1178,98 @@ static const u8 cmd_len[64] = {
     [0x24] = 2, [0x25] = 2,
 };
 
+/* ------------------------------------------------------- high-res rendering */
+#define HR_POOL  0x10000000u       /* colour is 32-bit, depth 16-bit */
+#define HR_SLOTS 8
+static u8 *hr_mem, *hr_hid;
+static int hr_want = 1;
+static struct { u32 addr, stamp; int width; } hr_slot[HR_SLOTS];
+static u32 hr_clock;
+
+void rdp_set_hires(int n) {
+    if (n == hr_want) return;
+    hr_want = n;
+    memset(hr_slot, 0, sizeof hr_slot);
+    if (n > 1 && !hr_mem) {        /* untouched pages cost nothing */
+        hr_mem = calloc(HR_POOL, 1);
+        hr_hid = calloc(HR_POOL / 2, 1);
+    }
+}
+
+/* Offset in the pool of the image the game keeps at RDRAM address `addr`. */
+static u32 hr_image(u32 addr, int width) {
+    int best = 0;
+    for (int i = 0; i < HR_SLOTS; i++) {
+        if (hr_slot[i].stamp && hr_slot[i].addr == addr) { hr_slot[i].stamp = ++hr_clock; return (u32)i * (HR_POOL / HR_SLOTS); }
+        if (hr_slot[i].stamp < hr_slot[best].stamp) best = i;
+    }
+    hr_slot[best].addr = addr; hr_slot[best].width = width; hr_slot[best].stamp = ++hr_clock;
+    return (u32)best * (HR_POOL / HR_SLOTS);
+}
+
+static void exec_cmd(const u64 *w);
+
+static void hr_replay(const u64 *w, int tri) {
+    /* smaller targets are textures the game renders for itself */
+    if (S.fb_size < 2 || S.fb_width < 200) return;
+    const int n = hr_want;
+    const u32 fa = S.fb_addr, za = S.z_addr, fill = S.fill, rng = S.rng;
+    const int fw = S.fb_width, fs = S.fb_size, xh = S.sc_xh, yh = S.sc_yh, xl = S.sc_xl, yl = S.sc_yl, sf = S.sc_field;
+    const int depth = fa == za;
+    S.fb_addr = hr_image(fa, fw * n);
+    S.z_addr = hr_image(za, fw * n);
+    S.fb_width = fw * n;
+    if (!depth) {                  /* colour goes 32-bit: no dithering, no banding */
+        if (fs == 2) {
+            u32 c = fill >> 16, r = (c >> 11) & 31, g = (c >> 6) & 31, b = (c >> 1) & 31;
+            S.fill = (r << 3 | r >> 2) << 24 | (g << 3 | g >> 2) << 16 | (b << 3 | b >> 2) << 8 | (c & 1 ? 0xE0u : 0);
+        }
+        S.fb_size = 3;
+    }
+    S.sc_field = 0;
+    if (tri) { S.sc_xh *= n; S.sc_yh *= n; S.sc_xl *= n; S.sc_yl *= n; }
+    hr_n = n; R_ram = hr_mem; R_hid = hr_hid; R_mask = HR_POOL - 1;
+    exec_cmd(w);
+    hr_n = 1; R_ram = n64_rdram; R_hid = hidden; R_mask = AMASK;
+    S.fb_addr = fa; S.z_addr = za; S.fill = fill; S.rng = rng; S.fb_width = fw; S.fb_size = fs;
+    S.sc_xh = xh; S.sc_yh = yh; S.sc_xl = xl; S.sc_yl = yl; S.sc_field = sf;
+}
+
+/* Copies the high-res image of `origin` into out (0x00RRGGBB), averaging each
+ * aa x aa group of pixels. Returns 0 until that image has been drawn. */
+int rdp_hires_fetch(u32 origin, int aa, u32 *out, int w, int h) {
+    origin &= AMASK;
+    for (int i = 0; i < HR_SLOTS; i++) {
+        /* games point the video output a few lines into the image */
+        const u32 skip = origin - hr_slot[i].addr;
+        if (!hr_slot[i].stamp || skip > 0x2000) continue;
+        const int lines = (int)skip / (hr_slot[i].width / hr_want * 2) * hr_want;
+        const size_t stride = (size_t)hr_slot[i].width * 4;
+        const u8 *base = hr_mem + (size_t)i * (HR_POOL / HR_SLOTS) + (size_t)lines * stride;
+        for (int y = 0; y < h; y++) {
+            const u8 *row = base + (size_t)y * aa * stride;
+            for (int x = 0; x < w; x++, row += (size_t)aa * 4) {
+                u32 r = 0, g = 0, b = 0;
+                for (int v = 0; v < aa; v++) {
+                    const u8 *p = row + (size_t)v * stride;
+                    for (int u = 0; u < aa; u++, p += 4) { r += p[0]; g += p[1]; b += p[2]; }
+                }
+                const u32 k = (u32)(aa * aa);
+                *out++ = (r / k) << 16 | (g / k) << 8 | (b / k);
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static void exec_cmd(const u64 *w) {
     const int op = (int)(w[0] >> 56) & 0x3F;
     if (rdp_debug && op != 0x27 && op != 0x28 && op != 0x29 && op != 0x26) fprintf(stderr, "RDP %02X %08X %08X\n", op, (u32)(w[0] >> 32), (u32)w[0]);
     const u32 hi = HI(w[0]), lo = LO(w[0]);
     if (op >= 0x08 && op <= 0x0F) {
         draw_tri(w, op & 4, op & 2, op & 1);
+        if (hr_want > 1 && hr_n == 1) hr_replay(w, 1);
         return;
     }
     switch (op) {
@@ -1164,6 +1277,7 @@ static void exec_cmd(const u64 *w) {
         u32 a = HI(w[1]), b = LO(w[1]);
         draw_rect((lo >> 12) & 0xFFF, lo & 0xFFF, (hi >> 12) & 0xFFF, hi & 0xFFF, (lo >> 24) & 7,
                   (s16)(a >> 16), (s16)a, (s16)(b >> 16), (s16)b, op & 1);
+        if (hr_want > 1 && hr_n == 1) hr_replay(w, 0);
         break;
     }
     case 0x29: n64_rdp_full_sync(); break;
@@ -1205,6 +1319,7 @@ static void exec_cmd(const u64 *w) {
     }
     case 0x36:
         draw_rect((lo >> 12) & 0xFFF, lo & 0xFFF, (hi >> 12) & 0xFFF, hi & 0xFFF, 0, 0, 0, 0, 0, 0);
+        if (hr_want > 1 && hr_n == 1) hr_replay(w, 0);
         break;
     case 0x37: S.fill = lo; break;
     case 0x38: S.fog = lo; break;

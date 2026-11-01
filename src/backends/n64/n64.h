@@ -60,5 +60,7 @@ void rdp_reset(void);
 /* Process commands in [start, end). xbus=1 reads them from DMEM, else RDRAM.
  * A partial command at the end stays buffered for the next call. */
 void rdp_run(u32 start, u32 end, int xbus);
+void rdp_set_hires(int n);          /* draw scale, host side only; 1 = off */
+int  rdp_hires_fetch(u32 origin, int aa, u32 *out, int w, int h);
 void n64_rdp_full_sync(void);      /* Sync Full command finished: raises DP interrupt */
 #endif

@@ -458,6 +458,8 @@ static void vi_output(void) {
     }
 }
 
+u32 n64_vi_origin(void) { return vi_reg[1] & 0xFFFFFF; }
+
 /* ---------------------------------------------------------- scheduler */
 #define CYCLES_PER_LINE 5960       /* 93.75 MHz / 60 Hz / 262 lines */
 #define SLICE 1200

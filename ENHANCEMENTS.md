@@ -47,6 +47,14 @@ Status: ✅ done · 🚧 in progress · ⬜ planned
 | ⬜ | 6 | Pixel-art upscalers | xBRZ / ScaleFX style edge smoothing |
 | ⬜ | 7 | Full widescreen on every stage | Extend background art where stages run out at the edges |
 
+| ✅ | N64 high resolution | Draws replayed at 2x to 4x into 32-bit host buffers; game state unchanged, checked over 3,900 frames. 2x runs at full speed |
+| ✅ | N64 anti-aliasing | 4x SSAA on top of the render resolution; too slow to be full speed for now |
+| ✅ | Pixel art upscaler | Scale2x and Scale4x for Genesis and SNES |
+| ✅ | Vivid colour | Saturation boost on every console |
+| ✅ | Enhancements screen | F9, or from the F10 menu; settings saved |
+| ⬜ | Faster N64 high-res | Replay draws on a second CPU core so 3x, 4x and anti-aliasing reach full speed |
+| ⬜ | N64 ultrawide | Patch the game's projection and culling and anchor the HUD, up to 21:9; the RDP already draws any shape |
+
 ## Sound
 
 | | # | Enhancement | Notes |

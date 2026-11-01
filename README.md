@@ -295,6 +295,37 @@ A = A, B or X = B, RT = Z, RB = R, Back = L, right stick = C buttons, Y = C-Up,
 Start = Start. On the keyboard: arrows = stick, Z = A, X or A = B, C = Z, D = R,
 S = C-Up, Return = Start, Right Shift = L.
 
+### Enhancements
+
+Recompiling isn't only about speed: Genexia controls the whole picture, so games can
+look better than they did on the console. Press **F9**, or choose Enhancements in the
+F10 menu. Settings are remembered.
+
+| Setting | Consoles | What it does |
+|---|---|---|
+| Widescreen | Genesis, SNES | Shows more of the scene at 16:9 |
+| Render resolution | N64 | Really draws the 3D at 2x to 4x, up to 1280 x 960, instead of scaling up a small picture. Colour is also 32-bit, which removes the N64's dithering |
+| Anti-aliasing | N64 | Draws at twice the chosen resolution and averages it down (4x SSAA) |
+| Pixel art upscaler | Genesis, SNES | Scale2x or Scale4x: rounds the corners of pixel art without inventing colours |
+| Video filter, scanline strength | All | Sharp, Smooth, Scanlines or CRT |
+| Colour | All | Original, or Vivid for about 30% more saturation |
+| Picture shape | All | Square pixels or 4:3 TV shape |
+| Sprite limit | Genesis, SNES | Removes the console's sprite limits, so there's no flicker |
+
+N64 high-resolution rendering never touches what the game sees. Each draw runs twice:
+once normally into console memory, and once scaled up into a separate picture. So game
+behaviour and save states stay identical at every setting. Super Mario 64 on the
+machine it was tested on:
+
+| N64 setting | Speed (60 fps is full speed) |
+|---|---|
+| 1x | 274 fps |
+| 2x | 109 fps |
+| 3x | 50 to 63 fps, slightly below full speed |
+| 4x, or 2x with anti-aliasing | 40 fps, too slow for now |
+
+From the command line: `--res 1-4`, `--aa 1-2`, `--upscale 0-2`, `--color 0-1`.
+
 ### Choosing a game
 
 Run Genexia with no game named, or open `Genexia.app`, and a game selector appears.

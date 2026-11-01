@@ -25,6 +25,7 @@
 #include "snes.h"
 #include "machine.h"
 #include "n64_machine.h"
+#include "enhance.h"
 
 extern u64 m68k_blocks_run, m68k_interp_run;
 
@@ -707,6 +708,7 @@ static void crt_draw(SDL_Renderer *ren, SDL_Texture *tex, const SDL_Rect *src, c
 
 /* ------------------------------------------------------------ settings */
 static char settings_path[4200];
+static int enh_res = 1, enh_aa = 1, enh_upscale, enh_color;   /* see enhance_frame() */
 static int settings_get(const char *key, int def) {
     FILE *f = settings_path[0] ? fopen(settings_path, "r") : NULL;
     if (!f) return def;
@@ -731,22 +733,38 @@ static void settings_save(void) {
     }
     f = fopen(settings_path, "w");
     if (!f) return;
-    fprintf(f, "filter %d\nstrength %d\nshape %d\nrunahead %d\nspeed %d\n%s %d\n%s %d\n",
-            video_filter, scan_strength, pic_shape, runahead, speed_pct, key_wide, vdp_widescreen, key_limit, vdp_no_sprite_limit);
+    fprintf(f, "filter %d\nstrength %d\nshape %d\nrunahead %d\nspeed %d\nres %d\naa %d\nupscale %d\ncolor %d\n%s %d\n%s %d\n",
+            video_filter, scan_strength, pic_shape, runahead, speed_pct, enh_res, enh_aa, enh_upscale, enh_color,
+            key_wide, vdp_widescreen, key_limit, vdp_no_sprite_limit);
     for (int i = 0; i < n; i++) fprintf(f, "%s\n", keep[i]);
     fclose(f);
 }
 
 /* ---------------------------------------------------------- options menu */
-enum { M_WIDE, M_FILTER, M_STRENGTH, M_SHAPE, M_LIMIT, M_RUNAHEAD, M_SPEED, M_CLOSE, M_COUNT };
+enum { M_WIDE, M_RES, M_AA, M_UPSCALE, M_FILTER, M_STRENGTH, M_COLOR, M_SHAPE, M_LIMIT, M_BACK,
+       M_ENHANCE, M_RUNAHEAD, M_SPEED, M_CLOSE, M_COUNT };
+static const int menu_pages[2][10] = {
+    { M_ENHANCE, M_RUNAHEAD, M_SPEED, M_CLOSE, -1 },
+    { M_WIDE, M_RES, M_AA, M_UPSCALE, M_FILTER, M_STRENGTH, M_COLOR, M_SHAPE, M_LIMIT, M_BACK },
+};
+static int menu_page;
 static int menu_open, menu_sel, menu_dirty;
-static const char *menu_names[M_COUNT] = { "Widescreen", "Video filter", "Scanline strength", "Picture shape",
-                                           "Sprite limit", "Run-ahead", "Game speed", "Close" };
+static const char *menu_names[M_COUNT] = { "Widescreen", "Render resolution", "Anti-aliasing", "Pixel art upscaler",
+                                           "Video filter", "Scanline strength", "Colour", "Picture shape",
+                                           "Sprite limit", "Back", "Enhancements", "Run-ahead", "Game speed", "Close" };
 static const char *menu_value(int i, char *b, size_t n) {
     static const char *filters[] = { "Sharp", "Smooth", "Scanlines", "CRT" };
     static const char *strengths[] = { "Soft", "Medium", "Strong" };
     switch (i) {
     case M_WIDE:     return be == &backend_n64 ? "-" : vdp_widescreen ? "16:9" : "Off";
+    case M_RES:      if (be != &backend_n64) return "-";
+                     snprintf(b, n, "%dx  (%d x %d)", enh_res, 320 * enh_res, 240 * enh_res); return b;
+    case M_AA:       if (be != &backend_n64) return "-";
+                     if (enh_aa == 1) return "Off";
+                     snprintf(b, n, "%dx SSAA", enh_aa * enh_aa); return b;
+    case M_UPSCALE:  return be == &backend_n64 ? "-" : enh_upscale == 2 ? "Scale4x" : enh_upscale ? "Scale2x" : "Off";
+    case M_COLOR:    return enh_color ? "Vivid" : "Original";
+    case M_ENHANCE:  return ">";
     case M_FILTER:   return filters[video_filter];
     case M_STRENGTH: return video_filter >= FILTER_SCANLINES ? strengths[scan_strength] : "-";
     case M_SHAPE:    return vdp_widescreen ? "-" : pic_shape ? "TV 4:3" : "Square pixels";
@@ -759,6 +777,10 @@ static const char *menu_value(int i, char *b, size_t n) {
 static void menu_change(int i, int dir) {
     switch (i) {
     case M_WIDE:     if (be != &backend_n64) { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; } break;
+    case M_RES:      if (be == &backend_n64) enh_res = (enh_res - 1 + dir + 4) % 4 + 1; break;
+    case M_AA:       if (be == &backend_n64) enh_aa = 3 - enh_aa; break;
+    case M_UPSCALE:  if (be != &backend_n64) enh_upscale = (enh_upscale + dir + 3) % 3; break;
+    case M_COLOR:    enh_color = !enh_color; break;
     case M_FILTER:   video_filter = (video_filter + dir + FILTER_COUNT) % FILTER_COUNT; break;
     case M_STRENGTH: scan_strength = (scan_strength + dir + 3) % 3; break;
     case M_SHAPE:    pic_shape = !pic_shape; break;
@@ -770,30 +792,45 @@ static void menu_change(int i, int dir) {
 }
 /* returns 1 when the menu closes */
 static int menu_input(int up, int down, int left, int right, int ok, int back) {
-    if (back) return 1;
-    if (up) menu_sel = (menu_sel + M_COUNT - 1) % M_COUNT;
-    if (down) menu_sel = (menu_sel + 1) % M_COUNT;
-    if (left) menu_change(menu_sel, -1);
-    if (right) menu_change(menu_sel, 1);
-    if (ok) { if (menu_sel == M_CLOSE) return 1; menu_change(menu_sel, 1); }
+    int count = 0;
+    while (count < 10 && menu_pages[menu_page][count] >= 0) count++;
+    const int item = menu_pages[menu_page][menu_sel];
+    if (back) {
+        if (!menu_page) return 1;
+        menu_page = 0; menu_sel = 0;
+        return 0;
+    }
+    if (up) menu_sel = (menu_sel + count - 1) % count;
+    if (down) menu_sel = (menu_sel + 1) % count;
+    if (left) menu_change(item, -1);
+    if (right) menu_change(item, 1);
+    if (ok) {
+        if (item == M_CLOSE) return 1;
+        if (item == M_ENHANCE) { menu_page = 1; menu_sel = 0; }
+        else if (item == M_BACK) { menu_page = 0; menu_sel = 0; }
+        else menu_change(item, 1);
+    }
     return 0;
 }
 static void menu_draw(u32 *fb, int stride, int w, int h) {
     fx_box(fb, stride, w, h, 0, 0, w, h, 0x000010, 0.62f);
-    const int PW = 248, RH = 15, PH = 54 + M_COUNT * RH;
+    int count = 0;
+    while (count < 10 && menu_pages[menu_page][count] >= 0) count++;
+    const int PW = 248, RH = 15, PH = 54 + count * RH;
     int x0 = (w - PW) / 2, y0 = (h - PH) / 2;
     fx_box(fb, stride, w, h, x0, y0, x0 + PW, y0 + PH, 0x10102C, 0.92f);
     fx_box(fb, stride, w, h, x0, y0, x0 + PW, y0 + 1, 0x5060FF, 1.0f);
     fx_box(fb, stride, w, h, x0, y0 + PH - 1, x0 + PW, y0 + PH, 0x5060FF, 1.0f);
-    const char *t = "GENEXIA OPTIONS";
+    const char *t = menu_page ? "ENHANCEMENTS" : "GENEXIA OPTIONS";
     fx_text(fb, stride, w, h, t, (w - fx_text_width(t, 2)) / 2, y0 + 8, 2, 0xFFFFFF, 0x80A0FF);
-    for (int i = 0; i < M_COUNT; i++) {
+    for (int i = 0; i < count; i++) {
+        const int item = menu_pages[menu_page][i];
         int y = y0 + 32 + i * RH, sel = i == menu_sel;
         if (sel) fx_box(fb, stride, w, h, x0 + 6, y - 3, x0 + PW - 6, y + 10, 0x3040A0, 0.9f);
         char buf[32];
-        const char *v = menu_value(i, buf, sizeof buf);
+        const char *v = menu_value(item, buf, sizeof buf);
         u32 c = sel ? 0xFFFFFF : 0xB0B8D0;
-        fx_text(fb, stride, w, h, menu_names[i], x0 + 12, y, 1, c, c);
+        fx_text(fb, stride, w, h, menu_names[item], x0 + 12, y, 1, c, c);
         if (*v) {
             char shown[48];
             snprintf(shown, sizeof shown, sel && v[0] != '-' ? "< %s >" : "%s", v);
@@ -803,6 +840,42 @@ static void menu_draw(u32 *fb, int stride, int w, int h) {
     t = "UP DOWN SELECT   LEFT RIGHT CHANGE";
     fx_text(fb, stride, w, h, t, (w - fx_text_width(t, 1)) / 2, y0 + PH - 14, 1, 0x8090B0, 0x8090B0);
 }
+/* The picture after enhancements, or NULL when the console's own output is
+ * shown as it is. Sets its size; the pixels stay valid until the next call. */
+static const u32 *enhance_frame(int *pw, int *ph) {
+    static u32 *buf, *tmp;
+    const int sw = vdp_screen_w, sh = vdp_screen_h;
+    const u32 *out = NULL;
+    int w = sw, h = sh;
+    if (!buf) { buf = malloc(4096 * 2048 * 4); tmp = malloc(4096 * 2048 * 4); }
+    if (be == &backend_n64) {
+        rdp_set_hires(enh_res * enh_aa);
+        if (enh_res * enh_aa > 1) {
+            w = sw * enh_res; h = sh * enh_res;
+            if (rdp_hires_fetch(n64_vi_origin(), enh_aa, buf, w, h)) out = buf;
+            else { w = sw; h = sh; }
+        }
+    } else if (enh_upscale) {
+        enhance_scale2x(vdp_framebuffer, VDP_FB_STRIDE, sw, sh, buf);
+        w = sw * 2; h = sh * 2;
+        if (enh_upscale == 2) {
+            memcpy(tmp, buf, (size_t)w * h * 4);
+            enhance_scale2x(tmp, w, w, h, buf);
+            w *= 2; h *= 2;
+        }
+        out = buf;
+    }
+    if (enh_color) {
+        if (!out) {
+            for (int y = 0; y < h; y++) memcpy(buf + (size_t)y * w, &vdp_framebuffer[y * VDP_FB_STRIDE], (size_t)w * 4);
+            out = buf;
+        }
+        enhance_vivid(buf, w * h);
+    }
+    *pw = w; *ph = h;
+    return out;
+}
+
 /* show a changed video option on the paused picture without advancing the game */
 static void refresh_picture(void) {
     if (!ra_buf) ra_buf = malloc(state_size());
@@ -1026,6 +1099,8 @@ int main(int argc, char **argv) {
         if (pref) { snprintf(settings_path, sizeof settings_path, "%ssettings.txt", pref); SDL_free(pref); }
         video_filter = settings_get("filter", video_filter) % FILTER_COUNT;
         scan_strength = settings_get("strength", scan_strength) % 3;
+        enh_res = settings_get("res", 1); enh_aa = settings_get("aa", 1);
+        enh_upscale = settings_get("upscale", 0); enh_color = settings_get("color", 0);
         pic_shape = settings_get("shape", pic_shape) & 1;
         runahead = settings_get("runahead", runahead) % 3;
         set_speed(settings_get("speed", speed_pct));
@@ -1035,6 +1110,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
         else if (!strcmp(argv[i], "--wide")) wide_opt = 1;
         else if (!strcmp(argv[i], "--no-wide")) wide_opt = 0;
+        else if (!strcmp(argv[i], "--res") && i + 1 < argc) enh_res = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--aa") && i + 1 < argc) enh_aa = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--upscale") && i + 1 < argc) enh_upscale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--color") && i + 1 < argc) enh_color = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--crt")) video_filter = FILTER_CRT;
         else if (!strcmp(argv[i], "--filter") && i + 1 < argc) {
             static const char *n[] = { "sharp", "smooth", "scanlines", "crt" };
@@ -1139,6 +1218,7 @@ int main(int argc, char **argv) {
             { extern int vdp_layout_debug; vdp_layout_debug = getenv("SF2_LAYOUT") && f == atoi(getenv("SF2_LAYOUT")); }
             { extern int rdp_debug; rdp_debug = getenv("SF2_RDPLOG") && f == atoi(getenv("SF2_RDPLOG")); }
             { extern int n64_dl_log; if (getenv("SF2_RDPLOG")) { int t = atoi(getenv("SF2_RDPLOG")); if (f == t - 2) n64_dl_log = 2; if (f > t) n64_dl_log = 0; } }
+            if (enh_res * enh_aa > 1 && be == &backend_n64) rdp_set_hires(enh_res * enh_aa);
             vdp_skip_render = getenv("SF2_LIVELIKE") != NULL;   /* dev: as the window loop does */
             run_frame();
             vdp_skip_render = 0;
@@ -1205,11 +1285,19 @@ int main(int argc, char **argv) {
             if (wav_f) { fwrite(host_buf, 4, (size_t)n, wav_f); wav_bytes += (u32)n * 4; }
             if (shot && getenv("SF2_SHOT_EVERY") && f % atoi(getenv("SF2_SHOT_EVERY")) == 0) {
                 char p[512]; snprintf(p, sizeof p, "%s.%05d.ppm", shot, f); save_ppm(p);
+                int ew, eh; const u32 *eo = enhance_frame(&ew, &eh);
+                if (eo) {
+                    snprintf(p, sizeof p, "%s.%05d.hi.ppm", shot, f);
+                    FILE *o = fopen(p, "wb");
+                    fprintf(o, "P6\n%d %d\n255\n", ew, eh);
+                    for (int i = 0; i < ew * eh; i++) { u8 c[3] = { (u8)(eo[i] >> 16), (u8)(eo[i] >> 8), (u8)eo[i] }; fwrite(c, 1, 3, o); }
+                    fclose(o);
+                }
             }
         }
         if (shot) {
             fx_apply(vdp_framebuffer, VDP_FB_STRIDE, vdp_screen_w, vdp_screen_h);
-            if (getenv("SF2_MENU_SHOT")) { menu_sel = 1; menu_draw(vdp_framebuffer, VDP_FB_STRIDE, vdp_screen_w, vdp_screen_h); }
+            if (getenv("SF2_MENU_SHOT")) { menu_sel = 1; menu_page = atoi(getenv("SF2_MENU_SHOT")) - 1; menu_draw(vdp_framebuffer, VDP_FB_STRIDE, vdp_screen_w, vdp_screen_h); }
             save_ppm(shot);
         }
         wav_close();
@@ -1276,7 +1364,7 @@ int main(int argc, char **argv) {
             else if (e.type == SDL_KEYDOWN && menu_open) {
                 SDL_Scancode c = e.key.keysym.scancode;
                 if (menu_input(c == SDL_SCANCODE_UP, c == SDL_SCANCODE_DOWN, c == SDL_SCANCODE_LEFT, c == SDL_SCANCODE_RIGHT,
-                               c == SDL_SCANCODE_RETURN || c == SDL_SCANCODE_SPACE, c == SDL_SCANCODE_ESCAPE || c == SDL_SCANCODE_F10)) {
+                               c == SDL_SCANCODE_RETURN || c == SDL_SCANCODE_SPACE, c == SDL_SCANCODE_ESCAPE || c == SDL_SCANCODE_F10 || c == SDL_SCANCODE_F9)) {
                     menu_open = 0; settings_save();
                 }
             } else if (e.type == SDL_CONTROLLERBUTTONDOWN && menu_open) {
@@ -1291,7 +1379,7 @@ int main(int argc, char **argv) {
                         ((e.cbutton.button == SDL_CONTROLLER_BUTTON_START || e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) &&
                          SDL_GameControllerGetButton(SDL_GameControllerFromInstanceID(e.cbutton.which),
                              e.cbutton.button == SDL_CONTROLLER_BUTTON_START ? SDL_CONTROLLER_BUTTON_BACK : SDL_CONTROLLER_BUTTON_START)))) {
-                menu_open = 1; menu_sel = 0;           /* R3, or Start + Back together */
+                menu_open = 1; menu_sel = 0; menu_page = 0;   /* R3, or Start + Back together */
             } else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
                 switch (e.key.keysym.scancode) {
                 case SDL_SCANCODE_ESCAPE: running = 0; break;
@@ -1299,7 +1387,8 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_F1: power_on(); break;
                 case SDL_SCANCODE_F2: if (be != &backend_n64) vdp_widescreen = !vdp_widescreen; break;
                 case SDL_SCANCODE_F3: video_filter = (video_filter + 1) % FILTER_COUNT; break;
-                case SDL_SCANCODE_F10: menu_open = 1; menu_sel = 0; break;
+                case SDL_SCANCODE_F10: menu_open = 1; menu_sel = 0; menu_page = 0; break;
+                case SDL_SCANCODE_F9: menu_open = 1; menu_sel = 0; menu_page = 1; break;
                 case SDL_SCANCODE_F4: vdp_no_sprite_limit = !vdp_no_sprite_limit; break;
                 case SDL_SCANCODE_Q: combo_pad_hint[0] = 0; combo_start(0, 0); break;
                 case SDL_SCANCODE_W: combo_pad_hint[0] = 0; combo_start(0, 1); break;
@@ -1445,8 +1534,22 @@ int main(int argc, char **argv) {
             menu_draw(menu_fb, VDP_FB_STRIDE, vdp_screen_w, vdp_screen_h);
             SDL_UpdateTexture(tex, NULL, menu_fb, VDP_FB_STRIDE * 4);
         } else SDL_UpdateTexture(tex, NULL, vdp_framebuffer, VDP_FB_STRIDE * 4);
+        /* the enhanced picture, in a texture sized for it */
+        static SDL_Texture *etex;
+        static int etw, eth, ew, eh;
+        static const u32 *eout;
+        if (todo || paused) eout = enhance_frame(&ew, &eh);
+        if (eout && (ew != etw || eh != eth)) {
+            if (etex) SDL_DestroyTexture(etex);
+            etex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, ew, eh);
+            etw = ew; eth = eh;
+        }
+        const int enhanced_now = eout && etex && !menu_open;
+        if (enhanced_now && todo) SDL_UpdateTexture(etex, NULL, eout, ew * 4);
         {
             SDL_Rect src = { 0, 0, vdp_screen_w, vdp_screen_h };
+            SDL_Texture *show = tex;
+            if (enhanced_now) { show = etex; src.w = ew; src.h = eh; }
             int ow, oh;
             SDL_GetRendererOutputSize(ren, &ow, &oh);
             SDL_RenderSetLogicalSize(ren, 0, 0);
@@ -1460,11 +1563,11 @@ int main(int argc, char **argv) {
             dst.x = (ow - dst.w) / 2; dst.y = (oh - dst.h) / 2;
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
             SDL_RenderClear(ren);
-            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
-            SDL_SetTextureAlphaMod(tex, 255);
-            SDL_SetTextureScaleMode(tex, video_filter == FILTER_SMOOTH ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
-            SDL_RenderCopy(ren, tex, &src, &dst);
-            if (video_filter >= FILTER_SCANLINES) crt_draw(ren, tex, &src, &dst);
+            SDL_SetTextureBlendMode(show, SDL_BLENDMODE_NONE);
+            SDL_SetTextureAlphaMod(show, 255);
+            SDL_SetTextureScaleMode(show, video_filter == FILTER_SMOOTH || enhanced_now ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+            SDL_RenderCopy(ren, show, &src, &dst);
+            if (video_filter >= FILTER_SCANLINES) crt_draw(ren, show, &src, &dst);
         }
         if (SDL_GetTicks() < osd_until || dragging) draw_osd(ren, win);
         if (speed_pct != last_speed) {
