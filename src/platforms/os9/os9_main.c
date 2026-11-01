@@ -6,10 +6,11 @@
  * is read from a file called sf2.bin next to the application.
  *
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
- * F1 = draw every other line (faster, looks like scanlines), F2 = full screen,
- * F3 = set up a gamepad with InputSprocket.
+ * F1 = draw every other line (faster, looks like scanlines), F2 = full screen
+ * at 640 x 480, F3 = set up a gamepad with InputSprocket.
  *
- * InputSprocket is found at run time, so the game still runs without it.
+ * DrawSprocket and InputSprocket are found at run time, so the game still runs
+ * without them.
  * The title bar shows game and drawn frames per second, and the share of time
  * in the emulation and in drawing: how to judge a machine. The same numbers go
  * to genexia.log next to the application every second. The file is opened and
@@ -180,24 +181,35 @@ static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t));
  * bursts, about twice as fast as single words. Floating-point stores must be
  * aligned there. Every second line is left out in every_other mode. Returns 0
  * if the system has to do it instead. */
+static CGrafPtr dsp_port;           /* the screen, while DrawSprocket owns it */
 static u32 last_frame[FB_H][FB_W];
 static int last_valid;
 static Point last_at;
 
 static int show_direct(void) {
-    if (!in_front || FrontWindow() != win) return 0;
-    GDHandle gd = GetMainDevice();
-    PixMapHandle pm = (**gd).gdPMap;
+    PixMapHandle pm;
+    Point o;
+    if (dsp_port) {
+        pm = dsp_port->portPixMap;
+        o.v = (short)((**pm).bounds.top + (480 - FB_H * 2) / 2);
+        o.h = (**pm).bounds.left;
+    } else {
+        if (!in_front || FrontWindow() != win) return 0;
+        GDHandle gd = GetMainDevice();
+        pm = (**gd).gdPMap;
+        o.v = pic.top; o.h = pic.left;
+        SetPort((GrafPtr)win);
+        LocalToGlobal(&o);
+        const Rect sr = (**gd).gdRect;
+        if (o.h < sr.left || o.v < sr.top + GetMBarHeight() || o.h + FB_W * 2 > sr.right || o.v + FB_H * 2 > sr.bottom) return 0;
+    }
     const int depth = (**pm).pixelSize;
     if (depth != 32 && depth != 16) return 0;
-    Point o = { pic.top, pic.left };
-    SetPort((GrafPtr)win);
-    LocalToGlobal(&o);
-    const Rect sr = (**gd).gdRect;
-    if (o.h < sr.left || o.v < sr.top + GetMBarHeight() || o.h + FB_W * 2 > sr.right || o.v + FB_H * 2 > sr.bottom) return 0;
-    Rect r = { o.v, o.h, (short)(o.v + FB_H * 2), (short)(o.h + FB_W * 2) };
-    const Point none = { 0, 0 };
-    ShieldCursor(&r, none);
+    if (!dsp_port) {
+        Rect r = { o.v, o.h, (short)(o.v + FB_H * 2), (short)(o.h + FB_W * 2) };
+        const Point none = { 0, 0 };
+        ShieldCursor(&r, none);
+    }
     if (o.v != last_at.v || o.h != last_at.h) last_valid = 0;
     last_at = o;
     static union { double d[FB_W + 1]; u32 w[FB_W * 2 + 2]; u16 h[FB_W * 2 + 4]; } buf;
@@ -233,7 +245,7 @@ static int show_direct(void) {
         }
     }
     last_valid = 1;
-    ShowCursor();
+    if (!dsp_port) ShowCursor();
     video_path = depth;
     return 1;
 }
@@ -418,6 +430,92 @@ static void isp_open(void) {
     isp_on = 1;
 }
 
+/* ------------------------------------------------------- DrawSprocket */
+typedef struct {
+    u32 frequency, width, height, reserved1, reserved2, color_needs;
+    void *color_table;
+    u32 options, back_depths, display_depths, back_best, display_best, pages;
+    char filler[3];
+    unsigned char must_confirm;
+    u32 reserved3[4];
+} DspAttrs;
+static void *dsp_ctx;
+static OSStatus (*dsp_startup)(void);
+static OSStatus (*dsp_best)(DspAttrs *, void **);
+static OSStatus (*dsp_reserve)(void *, DspAttrs *);
+static OSStatus (*dsp_release)(void *);
+static OSStatus (*dsp_state)(void *, u32);
+static OSStatus (*dsp_front)(void *, CGrafPtr *);
+static OSStatus (*dsp_event)(EventRecord *, unsigned char *);
+
+static void dsp_open(void) {
+    ConnectionID lib;
+    Ptr entry;
+    Str255 why;
+    const OSErr e = GetSharedLibrary("\pDrawSprocketLib", 'pwpc', 1, &lib, &entry, why);
+    if (e != noErr) { snprintf((char *)why, sizeof why, "DrawSprocket: library not found, error %d", e); log_line((char *)why); return; }
+    dsp_startup = isp_find(lib, "\pDSpStartup");
+    dsp_best = isp_find(lib, "\pDSpFindBestContext");
+    dsp_reserve = isp_find(lib, "\pDSpContext_Reserve");
+    dsp_release = isp_find(lib, "\pDSpContext_Release");
+    dsp_state = isp_find(lib, "\pDSpContext_SetState");
+    dsp_front = isp_find(lib, "\pDSpContext_GetFrontBuffer");
+    dsp_event = isp_find(lib, "\pDSpProcessEvent");
+    if (!dsp_startup || !dsp_best || !dsp_reserve || !dsp_release || !dsp_state || !dsp_front) { dsp_best = NULL; return; }
+    char l[80];
+    snprintf(l, sizeof l, "DrawSprocket: startup %ld", (long)dsp_startup());
+    log_line(l);
+}
+
+static void dsp_clear(void) {
+    PixMapHandle pm = dsp_port->portPixMap;
+    const int row = (**pm).rowBytes & 0x3FFF;
+    for (int y = 0; y < (**pm).bounds.bottom - (**pm).bounds.top; y++) {
+        volatile u32 *d = (volatile u32 *)((**pm).baseAddr + (size_t)y * row);
+        for (int x = 0; x < row / 4; x++) d[x] = 0;
+    }
+    last_valid = 0;
+}
+
+static int dsp_enter(void) {
+    if (!dsp_best) return 0;
+    DspAttrs a;
+    memset(&a, 0, sizeof a);
+    a.width = 640; a.height = 480;
+    a.color_needs = 2;              /* require */
+    a.back_depths = a.display_depths = 1u << 5 | 1u << 4;
+    a.back_best = a.display_best = 32;
+    a.pages = 1;
+    char l[100];
+    OSStatus s = dsp_best(&a, &dsp_ctx);
+    snprintf(l, sizeof l, "DrawSprocket: find 640x480 %ld", (long)s);
+    log_line(l);
+    if (s != noErr) return 0;
+    s = dsp_reserve(dsp_ctx, &a);
+    if (s == noErr) s = dsp_state(dsp_ctx, 0);
+    if (s == noErr) s = dsp_front(dsp_ctx, &dsp_port);
+    snprintf(l, sizeof l, "DrawSprocket: active %ld", (long)s);
+    log_line(l);
+    if (s != noErr || !dsp_port) { dsp_port = NULL; dsp_release(dsp_ctx); return 0; }
+    PixMapHandle pm = dsp_port->portPixMap;
+    snprintf(l, sizeof l, "DrawSprocket: screen %d x %d, %d bits", (**pm).bounds.right - (**pm).bounds.left,
+             (**pm).bounds.bottom - (**pm).bounds.top, (**pm).pixelSize);
+    log_line(l);
+    dsp_clear();
+    HideCursor();
+    last_valid = 0;
+    return 1;
+}
+
+static void dsp_leave(void) {
+    if (!dsp_port) return;
+    dsp_port = NULL;
+    dsp_state(dsp_ctx, 2);          /* inactive */
+    dsp_release(dsp_ctx);
+    ShowCursor();
+    black_window();
+}
+
 static u16 isp_read(void) {
     static const u16 pads[9] = {
         0, PAD_LEFT, PAD_UP | PAD_LEFT, PAD_UP, PAD_UP | PAD_RIGHT,
@@ -467,6 +565,7 @@ int main(void) {
     sound_start();
     log_line("--- Genexia build " GENEXIA_BUILD);
     isp_open();
+    dsp_open();
 
     unsigned long next = TickCount(), mark = next;
     int shown = 0, skipped = 0, ran = 0, f1_held = 0, f2_held = 0, f3_held = 0;
@@ -474,7 +573,10 @@ int main(void) {
     for (;;) {
         EventRecord ev;
         if (WaitNextEvent(everyEvent, &ev, 0, NULL)) {
-            if (ev.what == mouseDown) {
+            unsigned char taken = 0;
+            if (dsp_port && dsp_event) dsp_event(&ev, &taken);
+            if (taken) { }
+            else if (ev.what == mouseDown) {
                 WindowPtr w;
                 if (FindWindow(ev.where, &w) == inDrag) DragWindow(w, ev.where, &qd.screenBits.bounds);
             } else if (ev.what == osEvt && (ev.message >> 24 & 0xFF) == 1) {
@@ -493,13 +595,19 @@ int main(void) {
             const int f1 = key_down(km, 0x7A);
             if (f1 && !f1_held) {
                 every_other = !every_other;
-                black_window();
+                if (dsp_port) dsp_clear(); else black_window();
             }
             f1_held = f1;
             const int f2 = key_down(km, 0x78), f3 = key_down(km, 0x63);
-            if (f2 && !f2_held) { open_window(!full_screen); next = TickCount(); }
+            if (f2 && !f2_held) {
+                if (dsp_port) dsp_leave();
+                else if (full_screen) open_window(0);
+                else if (!dsp_enter()) open_window(1);
+                next = TickCount();
+            }
             f2_held = f2;
             if (f3 && !f3_held && isp_on && isp_configure) {
+                dsp_leave();
                 if (full_screen) open_window(0);
                 const OSStatus s = isp_configure(NULL);
                 isp_log("configure", s);
@@ -531,11 +639,11 @@ int main(void) {
             const int n = snprintf(t + 1, sizeof t - 1, "Game %d  Drawn %d  CPU %d%%  Draw %d%%", (int)(ran * 60 / ticks), (int)(shown * 60 / ticks),
                                    (int)(t_emu / (all / 100 + 1)), (int)(t_vid / (all / 100 + 1)));
             t[0] = (char)n;
-            if (!full_screen) SetWTitle(win, (ConstStr255Param)t);
+            if (!full_screen && !dsp_port) SetWTitle(win, (ConstStr255Param)t);
             {
                 char l[120];
                 snprintf(l, sizeof l, "%s  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1, video_path,
-                         every_other ? " alt-lines" : "", full_screen ? " full" : "", snd_chan ? "on" : "off",
+                         every_other ? " alt-lines" : "", dsp_port ? " full640" : full_screen ? " full" : "", snd_chan ? "on" : "off",
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
             }
@@ -545,6 +653,7 @@ int main(void) {
             mark = TickCount();
         }
     }
+    dsp_leave();
     isp_close();
     if (snd_chan) SndDisposeChannel(snd_chan, true);
     if (full_screen) menu_bar_show(1);
