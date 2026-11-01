@@ -26,7 +26,7 @@ RUNTIME  := src/core/main.c src/core/state.c src/core/enhance.c \
             src/backends/snes/apu.c src/backends/snes/dsp1.c \
             src/chips/r4300.c src/chips/rsp.c src/chips/rdp.c src/backends/n64/machine.c
 # recompiled games: recomps/<console>/<game>/, generated code plus coverage.txt
-GEN      := $(sort $(wildcard recomps/*/*/recomp_*.c))
+GEN      := $(sort $(filter-out recomps/n64/sm64c/%,$(wildcard recomps/*/*/recomp_*.c)))
 RDP_WORKERS := 0 1 2 3 4 5
 OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:recomps/%.c=$(BUILD)/gen/%.o) $(RDP_WORKERS:%=$(BUILD)/chips/rdp_w%.o)
 
@@ -104,7 +104,22 @@ $(BUILD)/ls/%.o: %.c $(HDRS)
 smk-lockstep: $(LS_REST) $(LS_OBJ)
 	$(CC) -o genexia-lockstep $^ $(SDL_LD) -lm
 
+# dev: Mario 64 from the compact recompiler, run on this Mac
+N64C_OBJ := $(patsubst recomps/%.c,$(BUILD)/gen/%.o,$(wildcard recomps/n64/sm64c/recomp_*.c))
+genexia-n64c: $(filter-out $(BUILD)/gen/n64/sm64/%,$(OBJS)) $(N64C_OBJ)
+	$(CC) -o $@ $^ $(SDL_LD) -lm
+
+N64L_OBJ := $(patsubst %.c,$(BUILD)/l6/%.o,src/chips/r4300.c $(wildcard recomps/n64/sm64c/recomp_*.c))
+$(BUILD)/l6/%.o: %.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -std=gnu11 -w $(INCS) -DR4_LOCKSTEP -c -o $@ $<
+n64c-lockstep: $(filter-out $(BUILD)/gen/n64/sm64/% $(BUILD)/chips/r4300.o,$(OBJS)) $(N64L_OBJ)
+	$(CC) -o genexia-n64l $^ $(SDL_LD) -lm
+
 SM64_ROM ?= roms/n64/Super Mario 64 (USA).z64
+recompile-sm64c:
+	python3 tools/recompile_mips32.py "$(SM64_ROM)" recomps/n64/sm64c --entries recomps/n64/sm64/coverage.txt --register recomp_register_sm64
+
 recompile-sm64:
 	python3 tools/recompile_mips.py "$(SM64_ROM)" recomps/n64/sm64 --entries recomps/n64/sm64/coverage.txt --prefix M_ --register recomp_register_sm64
 

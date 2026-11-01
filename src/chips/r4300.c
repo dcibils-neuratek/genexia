@@ -22,7 +22,7 @@
  * the guest's mode differs, and is restored to nearest when r4300_run returns,
  * so other chips never see a guest rounding mode.
  */
-#include "r4300_recomp.h"
+#include "r4300_compact.h"
 #include <fenv.h>
 #include <math.h>
 #include <stdlib.h>
@@ -626,6 +626,49 @@ void r4300_recomp_add(u32 pc, R4Block fn, const u32 *words, u32 n) {
     rec_head[i] = ++rec_n;
 }
 
+void r4300_compact_add(const R4Compact *t, unsigned n) {
+    for (unsigned i = 0; i < n; i++) r4300_recomp_add(t[i].pc, t[i].fn, t[i].words, t[i].n);
+}
+
+#ifdef R4_LOCKSTEP
+/* Dev check: after each compact block, its effects are undone and the interpreter
+ * runs the same cycles from the same state. Registers and written memory must
+ * agree. Blocks that touched hardware can't be repeated and are skipped. */
+static struct { u32 a; int n; u8 old[4], now[4]; } lk[4096];
+static int lk_n, lk_io, lk_bad;
+static long lk_blocks, lk_skipped;
+void r4_log(u32 a, int n) {
+    if (lk_n == 4096) { lk_io = 1; return; }
+    lk[lk_n].a = a; lk[lk_n].n = n;
+    memcpy(lk[lk_n].old, n64_rdram + (a - 0x80000000u), (size_t)n);
+    lk_n++;
+}
+#endif
+
+/* Hardware, from compact blocks. Those only run where kseg0 and kseg1 reach it:
+ * Mario 64 has no TLB mappings. */
+/* Mapped addresses come here too: the Mario head's model data is read through
+ * the TLB. Those pages are mapped ahead of use, so no fault is expected. */
+static u32 r4_io_addr(u32 a, int wr) {
+    u32 pa;
+    if ((a >> 30) == 2) return a & 0x1FFFFFFF;
+    return xlate(a, wr, &pa) == XL_OK ? pa : a & 0x1FFFFFFF;
+}
+u32 r4_io_read(u32 a, int size) {
+#ifdef R4_LOCKSTEP
+    lk_io = 1;
+#endif
+    const u32 pa = r4_io_addr(a, 0);
+    return size == 4 ? n64_read32(pa) : size == 2 ? n64_read16(pa) : n64_read8(pa);
+}
+void r4_io_write(u32 a, u32 v, int size) {
+#ifdef R4_LOCKSTEP
+    lk_io = 1;
+#endif
+    const u32 pa = r4_io_addr(a, 1);
+    if (size == 4) n64_write32(pa, v); else if (size == 2) n64_write16(pa, (u16)v); else n64_write8(pa, (u8)v);
+}
+
 void r4300_recomp_enable(void) {
     rec_alloc();
     if (!r4_active) r4_active = calloc(REC_SLOTS, sizeof *r4_active);
@@ -814,6 +857,65 @@ void r4300_reset(u32 pc) {
         }                                                                     \
     } while (0)
 
+#ifdef R4_LOCKSTEP
+static int lk_run(R4Block fn, u32 pc, int used) {
+    static u64 g0[32], g1[32];
+    static u32 f0[64], f1[64];
+    const u64 hi0 = s_hi, lo0 = s_lo;
+    const u32 fc0 = s_fcr31;
+    memcpy(g0, r4300_gpr, sizeof g0); memcpy(f0, s_fpw, sizeof f0);
+    const int limit = s_limit;
+    s_limit = 0;                       /* no chaining: one block at a time */
+    lk_n = lk_io = 0;
+    int after = fn(used);
+    s_limit = limit;
+    if (after == used + 2) { }         /* idle loop: time only */
+    const u32 pc1 = r4_pc, exit1 = r4_exit;
+    if (++lk_blocks % 5000000 == 0) fprintf(stderr, "lockstep: %ld blocks, %ld skipped, %d differ\n", lk_blocks, lk_skipped, lk_bad);
+    if (lk_io || after == used + 2 || after == used) { lk_skipped++; return after; }
+    const u64 hi1 = s_hi, lo1 = s_lo;
+    const u32 fc1 = s_fcr31;
+    memcpy(g1, r4300_gpr, sizeof g1); memcpy(f1, s_fpw, sizeof f1);
+    for (int i = lk_n - 1; i >= 0; i--) {
+        u8 *m = n64_rdram + (lk[i].a - 0x80000000u);
+        memcpy(lk[i].now, m, (size_t)lk[i].n);
+    }
+    for (int i = lk_n - 1; i >= 0; i--) memcpy(n64_rdram + (lk[i].a - 0x80000000u), lk[i].old, (size_t)lk[i].n);
+    memcpy(r4300_gpr, g0, sizeof g0); memcpy(s_fpw, f0, sizeof f0);
+    s_hi = hi0; s_lo = lo0; s_fcr31 = fc0;
+    /* the interpreter, for as many cycles */
+    static u32 c0[32];
+    memcpy(c0, r4300_cop0, sizeof c0);
+    const u32 spc = s_pc, snpc = s_npc; const int sdelay = s_delay;
+    const int sbase = s_count_base, sirq = s_irq_pending;
+    R4Block *keep = r4_active;
+    r4_active = NULL;
+    r4300_cop0[12] &= ~1u;
+    s_pc = pc; s_npc = pc + 4; s_delay = 0;
+    r4300_run(after - used);
+    const u32 ipc = s_pc, lk_cause = r4300_cop0[13], lk_status = r4300_cop0[12], lk_epc = r4300_cop0[14];
+    r4_active = keep;
+    memcpy(r4300_cop0, c0, sizeof c0);
+    s_pc = spc; s_npc = snpc; s_delay = sdelay; s_count_base = sbase; s_irq_pending = sirq;
+    int bad = ipc != pc1 || s_hi != hi1 || s_lo != lo1 || (s_fcr31 & 0x800003) != (fc1 & 0x800003);
+    for (int i = 1; i < 32; i++) if (r4300_gpr[i] != g1[i]) bad |= 2;
+    if (memcmp(s_fpw, f1, sizeof f1)) bad |= 4;
+    for (int i = 0; i < lk_n; i++) if (memcmp(n64_rdram + (lk[i].a - 0x80000000u), lk[i].now, (size_t)lk[i].n)) bad |= 8;
+    if (bad && lk_bad++ < 25) {
+        fprintf(stderr, "block %08X: bad %d pc %08X/%08X exit %X cause %08X status %08X epc %08X\n", pc, bad, pc1, ipc, exit1, lk_cause, lk_status, lk_epc);
+        for (int i = 1; i < 32; i++) if (r4300_gpr[i] != g1[i])
+            fprintf(stderr, "   r%d compact %016llX interp %016llX (was %016llX)\n", i, (unsigned long long)g1[i], (unsigned long long)r4300_gpr[i], (unsigned long long)g0[i]);
+        if (s_hi != hi1 || s_lo != lo1) fprintf(stderr, "   hi/lo\n");
+    }
+    /* carry on with the block's result */
+    memcpy(r4300_gpr, g1, sizeof g1); memcpy(s_fpw, f1, sizeof f1);
+    s_hi = hi1; s_lo = lo1; s_fcr31 = fc1;
+    for (int i = 0; i < lk_n; i++) memcpy(n64_rdram + (lk[i].a - 0x80000000u), lk[i].now, (size_t)lk[i].n);
+    r4_pc = pc1; r4_exit = exit1;
+    return after;
+}
+#endif
+
 int r4300_run(int cycles) {
     u64 *const gpr = r4300_gpr;
     u32 *const cop0 = r4300_cop0;
@@ -866,7 +968,11 @@ int r4300_run(int cycles) {
                 if (fn) {
                     gpr[0] = 0;
                     r4_exit = 0;
+#ifdef R4_LOCKSTEP
+                    used = lk_run(fn, pc, used);
+#else
                     used = fn(used);
+#endif
                     pc = r4_pc;
                     npc = pc + 4;
                     if (r4_exit & R4_EXIT_DELAY) { nds = 1; npc = r4_npc; }

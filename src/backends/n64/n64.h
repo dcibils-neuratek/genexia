@@ -16,7 +16,11 @@
 #define N64_H
 #include "genesis.h"              /* u8..s64, vdp_framebuffer */
 
+#ifdef GENEXIA_OS9
+#define N64_STATE
+#else
 #define N64_STATE __attribute__((section("__DATA,__n64state")))
+#endif
 #define N64_RDRAM_SIZE 0x800000   /* 8 MB (expansion pak present) */
 
 extern u8 n64_rdram[N64_RDRAM_SIZE];

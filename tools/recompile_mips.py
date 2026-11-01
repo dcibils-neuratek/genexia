@@ -476,4 +476,5 @@ def main():
     print('%d blocks, %d instructions, %d self loops' % (len(blocks), insts, getattr(r, 'loops', 0)), file=sys.stderr)
 
 
-main()
+if __name__ == '__main__':
+    main()
