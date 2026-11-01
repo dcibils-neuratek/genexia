@@ -473,9 +473,9 @@ static void apply_state(int rect) {
     }
     int at = 0;
     float ref = 0;
-    if ((oth_l & 3) == 1) { at = 1; ref = c_blend[3] / 255.0f; }
+    if (cycle == 2) { at = (oth_l & 3) != 0; ref = 0; }   /* copy mode only asks for non-zero */
+    else if ((oth_l & 3) == 1) { at = 1; ref = c_blend[3] ? (c_blend[3] - 1) / 255.0f : 0; }
     else if (oth_l & 0x1000) { at = 1; ref = 0.5f; }
-    else if (cycle == 2 && (oth_l & 3)) { at = 1; ref = 0; }
     if (at != gl_atest) { gl_atest = at; if (at) glEnable(GL_ALPHA_TEST); else glDisable(GL_ALPHA_TEST); }
     if (at) glAlphaFunc(GL_GREATER, ref);
 

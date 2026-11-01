@@ -77,8 +77,10 @@ int main(int argc, char **argv) {
     n64_register_game = recomp_register_sm64;
     n64_gfx_hook = gfx;
     n64_reset();
-    for (int fr = 0; fr < 3600; fr++) {
+    for (int fr = 0; fr < 7200; fr++) {
         pad_state[0] = (fr >= 400 && fr < 410) || (fr >= 620 && fr < 630) || (fr >= 900 && fr < 910) || (fr >= 1200 && fr < 1210) ? PAD_START : 0;
+        if (fr > 3600 && fr % 40 < 4) pad_state[0] = PAD_A;   /* through the dialog */
+        if (fr > 5200) pad_state[0] = PAD_UP | (fr % 80 < 10 ? PAD_A : 0);
         n64_run_frame();
         if (fr % 300 == 0) shot(argv[2], fr);
     }
