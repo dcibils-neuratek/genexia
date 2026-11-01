@@ -164,6 +164,7 @@ static void wide_frame(void) {
 #ifdef N64_BENCH
 /* For timing the game alone: RSP tasks take no time and do nothing. */
 static int bench_task;
+void (*n64_gfx_hook)(u32);         /* draws a graphics task's display list */
 static void bench_finish(void) {
     sp_status |= SP_HALT | SP_BROKE | 0x200;      /* signal 2: task done */
     if (sp_status & SP_INTR_BREAK) mi_raise(MI_SP);
@@ -178,7 +179,10 @@ static void sp_status_write(u32 v) {
 #endif
     if (v & 1) { sp_status &= ~(u32)SP_HALT; st_sp_start++; }
 #ifdef N64_BENCH
-    if (v & 1) bench_task = 800;
+    if (v & 1) {
+        if (n64_gfx_hook && R32(&n64_sp_mem[0xFC0]) == 1) n64_gfx_hook(R32(&n64_sp_mem[0xFC0 + 0x30]));
+        bench_task = 800;
+    }
 #endif
     if (v & 2) sp_status |= SP_HALT;
     if (v & 4) sp_status &= ~(u32)SP_BROKE;

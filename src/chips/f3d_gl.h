@@ -1,0 +1,31 @@
+/* f3d_gl.h - the OpenGL calls f3d.c makes. On Mac OS 9 there's no import
+ * library, so these are pointers looked up at start by name. */
+#ifndef F3D_GL_H
+#define F3D_GL_H
+#ifdef GENEXIA_OS9
+#include "f3d_gl_os9.h"
+#else
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl.h>
+#include <OpenGL/glext.h>
+#define GL_COMBINE_EXT GL_COMBINE
+#define GL_COMBINE_RGB_EXT GL_COMBINE_RGB
+#define GL_COMBINE_ALPHA_EXT GL_COMBINE_ALPHA
+#define GL_INTERPOLATE_EXT GL_INTERPOLATE
+#define GL_CONSTANT_EXT GL_CONSTANT
+#define GL_PRIMARY_COLOR_EXT GL_PRIMARY_COLOR
+#define GL_PREVIOUS_EXT GL_PREVIOUS
+#define GL_SOURCE0_RGB_EXT GL_SOURCE0_RGB
+#define GL_SOURCE1_RGB_EXT GL_SOURCE1_RGB
+#define GL_SOURCE2_RGB_EXT GL_SOURCE2_RGB
+#define GL_SOURCE0_ALPHA_EXT GL_SOURCE0_ALPHA
+#define GL_SOURCE1_ALPHA_EXT GL_SOURCE1_ALPHA
+#define GL_SOURCE2_ALPHA_EXT GL_SOURCE2_ALPHA
+#define GL_OPERAND0_RGB_EXT GL_OPERAND0_RGB
+#define GL_OPERAND1_RGB_EXT GL_OPERAND1_RGB
+#define GL_OPERAND2_RGB_EXT GL_OPERAND2_RGB
+#define glActiveTextureARB glActiveTexture
+#define GL_TEXTURE0_ARB GL_TEXTURE0
+#define GL_TEXTURE1_ARB GL_TEXTURE1
+#endif
+#endif
