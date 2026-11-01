@@ -3,6 +3,10 @@
 #include "genesis.h"
 int  n64_detect(void);
 const char *n64_load(void);
+extern void (*n64_register_game)(void);
+extern int n64_force_interp;
+void recomp_register_sm64(void);
+void r4300_recomp_flush(void);
 void n64_reset(void);
 void n64_run_frame(void);
 void n64_debug_print(void);

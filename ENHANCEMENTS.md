@@ -25,8 +25,9 @@ Status: ✅ done · 🚧 in progress · ⬜ planned
 | ✅ | SNES backend | 65C816, PPU with Mode 7, SPC700 + S-DSP, DSP-1, DMA/HDMA. Super Mario Kart plays: menus, racing, sound, save states |
 | ✅ | SNES recompiler | `tools/recompile_65816.py`: blocks per address and M/X mode, shared instruction logic with the interpreter. Super Mario Kart recompiled, pixel-identical in attract mode |
 | ✅ | SNES widescreen | Mode 7 frames render 342 px of real track; menus stay centred with side bars. On by default for recompiled SNES games, F2 or the menu toggles it |
-| ✅ | Nintendo 64 backend | R4300i, RSP running real microcode, software RDP, PI/SI/AI/VI/MI, joybus, EEPROM. Super Mario 64 plays: intro, castle grounds, sound, bit-exact save states, about 3x full speed on the interpreter |
-| ⬜ | N64 recompiler | MIPS to C like the other backends; speed is already fine, this is for consistency and headroom |
+| ✅ | Nintendo 64 backend | R4300i, RSP running real microcode, software RDP, PI/SI/AI/VI/MI, joybus, EEPROM. Super Mario 64 plays: intro, castle grounds, sound, bit-exact save states, about 3.7x full speed recompiled |
+| ✅ | N64 recompiler | `tools/recompile_mips.py`: one C function per block, overlay aware. Super Mario 64 recompiled: full machine state identical to the interpreter over a 3,900 frame run, 1.8x faster overall than the interpreter |
+| ✅ | `recomps/` | Every recompiled game in one tree: `recomps/<console>/<game>/`, generated C plus `coverage.txt` |
 | ⬜ | N64 widescreen | Needs the game's projection widened; true high-resolution output is possible too |
 
 ## Smoothness and speed

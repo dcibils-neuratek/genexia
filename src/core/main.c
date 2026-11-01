@@ -490,7 +490,12 @@ static void configure_game(int region_set) {
         m68k_register_game = NULL;
         state_use_section("__n64state");
         snprintf(game_title, sizeof game_title, "%s", n64_load());
-        fprintf(stderr, "Game: %s  (Nintendo 64, interpreter)\n", game_title);
+        /* recompiled code for this exact ROM, if we have it */
+        n64_register_game = !strcmp(game_title, "SUPER MARIO 64") && rom[0x10] == 0x63 && rom[0x11] == 0x5A
+                            ? recomp_register_sm64 : NULL;
+        n64_force_interp = m68k_force_interp || !n64_register_game;
+        state_on_load = r4300_recomp_flush;
+        fprintf(stderr, "Game: %s  (Nintendo 64, %s)\n", game_title, n64_force_interp ? "interpreter" : "recompiled");
         return;
     }
     if (memcmp(rom + 0x100, "SEGA", 4) && snes_detect()) {
@@ -936,6 +941,13 @@ int main(int argc, char **argv) {
             run_frame();
             vdp_skip_render = 0;
             if (getenv("SF2_HEADLESS_RA")) run_ahead_frames();
+            if (getenv("SF2_STATEHASH") && f % atoi(getenv("SF2_STATEHASH")) == 0) {   /* dev: compare two runs */
+                static u8 *hb; if (!hb) hb = malloc(state_size());
+                state_save(hb);
+                u64 h = 1469598103934665603ull;
+                for (size_t i = 0; i < state_size(); i += 8) { u64 w; memcpy(&w, hb + i, 8); h = (h ^ w) * 1099511628211ull; }
+                printf("%d %016llx\n", f, (unsigned long long)h);
+            }
             if (st_buf && f >= state_at && f < state_at + 900) {
                 if (st_pass == 0) st_h1 = st_h1 * 31 + ram_hash(); else st_h2 = st_h2 * 31 + ram_hash();
                 if (f == state_at + 899) {

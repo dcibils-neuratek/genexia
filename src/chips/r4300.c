@@ -22,13 +22,10 @@
  * the guest's mode differs, and is restored to nearest when r4300_run returns,
  * so other chips never see a guest rounding mode.
  */
-#include "n64.h"
+#include "r4300_recomp.h"
 #include <fenv.h>
 #include <math.h>
-#include <string.h>
-
-#define likely(x)   __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+#include <stdlib.h>
 
 enum {
     C0_INDEX = 0, C0_RANDOM = 1, C0_ENTRYLO0 = 2, C0_ENTRYLO1 = 3, C0_CONTEXT = 4,
@@ -88,7 +85,7 @@ typedef struct { u32 tag, pa; } TcEntry;
 u64 r4300_gpr[32] N64_STATE;
 u32 r4300_cop0[32] N64_STATE;
 
-static u64 s_hi N64_STATE, s_lo N64_STATE;
+u64 s_hi N64_STATE, s_lo N64_STATE;
 static u32 s_pc N64_STATE, s_npc N64_STATE;
 static int s_delay N64_STATE;          /* instruction at s_pc is in a delay slot */
 static u32 s_llbit N64_STATE;
@@ -99,14 +96,14 @@ static u32 s_tc_key N64_STATE;         /* ASID and ERL the cache was built for *
 
 /* FPR words: FR=1 reg n is words 2n/2n+1, FR=0 reg n is one half of the even
  * register. Host is little-endian: even word = low half. */
-static u32 s_fpw[64] N64_STATE;
-static u32 s_fcr31 N64_STATE;
+u32 s_fpw[64] N64_STATE;
+u32 s_fcr31 N64_STATE;
 
 static u32 s_count_frac N64_STATE;     /* half a Count tick carried over */
 static u64 s_total N64_STATE;          /* CPU cycles, drives Random */
 static u64 s_random_t0 N64_STATE;      /* s_total when Random was last 31 */
 static int s_count_base N64_STATE;     /* `used` value Count is synced to */
-static int s_limit N64_STATE;
+int s_limit N64_STATE;
 static int s_irq_pending N64_STATE;
 
 static int s_host_rm;                  /* host side, not emulated state */
@@ -590,8 +587,108 @@ static int cop1_l(u32 inst) {
     return COST_FCVT;
 }
 
+int r4300_cop1(u32 inst) {
+    switch ((inst >> 21) & 31) {
+    case 16: return cop1_s(inst);
+    case 17: return cop1_d(inst);
+    case 20: return cop1_w(inst);
+    default: return cop1_l(inst);
+    }
+}
+
+/* ---------------------------------------------------------- recompiled blocks */
+typedef struct { u32 pc, n; R4Block fn; const u32 *words; int next; } RecEntry;
+
+#define REC_SLOTS (N64_RDRAM_SIZE >> 2)
+#define REC_PAGES (N64_RDRAM_SIZE >> 12)
+R4Block *r4_active;
+u32 r4_pc, r4_npc, r4_exit;        /* only meaningful while a block returns */
+static RecEntry *rec_ent;
+static int rec_n, rec_cap, *rec_head;
+static u8 rec_page[REC_PAGES];     /* pages with something in r4_active */
+static FILE *rec_log;
+static const u32 *rec_rom_of;      /* dev: where each RDRAM word came from */
+static long rec_blocks, rec_rejected;
+
+static void rec_alloc(void) {
+    if (rec_head) return;
+    rec_head = calloc(REC_SLOTS, sizeof *rec_head);
+}
+
+void r4300_recomp_add(u32 pc, R4Block fn, const u32 *words, u32 n) {
+    rec_alloc();
+    if (rec_n == rec_cap) {
+        rec_cap = rec_cap ? rec_cap * 2 : 4096;
+        rec_ent = realloc(rec_ent, (size_t)rec_cap * sizeof *rec_ent);
+    }
+    u32 i = (pc & 0x7FFFFFu) >> 2;
+    rec_ent[rec_n] = (RecEntry){ pc, n, fn, words, rec_head[i] };
+    rec_head[i] = ++rec_n;
+}
+
+void r4300_recomp_enable(void) {
+    rec_alloc();
+    if (!r4_active) r4_active = calloc(REC_SLOTS, sizeof *r4_active);
+}
+
+static void rec_flush_page(u32 p) {
+    if (!rec_page[p]) return;
+    rec_page[p] = 0;
+    memset(&r4_active[p << 10], 0, sizeof *r4_active << 10);
+}
+
+void r4300_recomp_flush(void) {
+    if (r4_active) for (u32 p = 0; p < REC_PAGES; p++) rec_flush_page(p);
+}
+
+/* Blocks are checked per entry, so one reaching in from the page before counts. */
+void r4300_code_written(u32 pa, u32 n) {
+    if (!r4_active || !n || pa >= N64_RDRAM_SIZE) return;
+    u32 p = pa >> 12, last = (pa + n - 1) >> 12;
+    if (p) p--;
+    for (; p <= last && p < REC_PAGES; p++) rec_flush_page(p);
+}
+
+void r4300_recomp_log(FILE *f, const u32 *rom_of) {
+    rec_log = f;
+    rec_rom_of = rom_of;
+    r4300_recomp_enable();
+}
+
+void r4300_recomp_print(void) {
+    long active = 0;
+    if (r4_active) for (u32 i = 0; i < REC_SLOTS; i++) active += r4_active[i] != NULL;
+    fprintf(stderr, "recomp: %d blocks known, %ld active, %ld rejected\n", rec_n, active, rec_rejected);
+}
+
+static R4Block rec_find(u32 pc) {
+    u32 i = (pc & 0x7FFFFFu) >> 2;
+    for (int e = rec_head[i]; e; e = rec_ent[e - 1].next) {
+        const RecEntry *r = &rec_ent[e - 1];
+        const u8 *code = n64_rdram + (pc & 0x7FFFFFu);
+        u32 k = 0;
+        while (k < r->n && (pc & 0x7FFFFFu) + k * 4 < N64_RDRAM_SIZE && rd32(code + k * 4) == r->words[k]) k++;
+        if (k == r->n) {
+            r4_active[i] = r->fn;
+            rec_page[i >> 10] = 1;
+            return r->fn;
+        }
+        rec_rejected++;
+    }
+    return NULL;
+}
+
+static void rec_log_miss(u32 pc) {
+    static u8 seen[REC_SLOTS / 8];
+    u32 i = (pc & 0x7FFFFFu) >> 2;
+    if (seen[i >> 3] & (1 << (i & 7))) return;
+    seen[i >> 3] |= (u8)(1 << (i & 7));
+    if (rec_rom_of[i]) fprintf(rec_log, "B %08X %07X\n", pc, rec_rom_of[i]);
+}
+
 /* ---------------------------------------------------------------- reset */
 void r4300_reset(u32 pc) {
+    r4300_recomp_flush();
     memset(r4300_gpr, 0, sizeof r4300_gpr);
     memset(r4300_cop0, 0, sizeof r4300_cop0);
     memset(s_tlb, 0, sizeof s_tlb);
@@ -734,6 +831,7 @@ int r4300_run(int cycles) {
 
     u32 exc_code = 0, exc_ce = 0, fault_va = 0;
     int fault_kind = 0, fault_wr = 0;
+    int stall = 0, skip = 0, after_bail = 0;   /* block dispatch, see below */
 
     s_count_base = 0;
     s_limit = 0;
@@ -752,6 +850,34 @@ int r4300_run(int cycles) {
             }
             if (used >= target) break;
             s_limit = next_limit(used, target);
+            stall = 0;
+        }
+
+        /* Run a block when one starts here. A block that ended early asks for
+         * one interpreted instruction, or for the rest of this time slice when
+         * it would not fit before s_limit. */
+        if (r4_active && !nds) {
+            if (skip) {
+                skip = 0;
+                after_bail = 1;
+            } else if (!stall && (u32)(pc - 0x80000000u) < N64_RDRAM_SIZE && !(pc & 3)) {
+                R4Block fn = r4_active[(pc & 0x7FFFFFu) >> 2];
+                if (!fn && rec_head[(pc & 0x7FFFFFu) >> 2]) fn = rec_find(pc);
+                if (fn) {
+                    gpr[0] = 0;
+                    r4_exit = 0;
+                    used = fn(used);
+                    pc = r4_pc;
+                    npc = pc + 4;
+                    if (r4_exit & R4_EXIT_DELAY) { nds = 1; npc = r4_npc; }
+                    else skip = !!(r4_exit & R4_EXIT_STEP);
+                    stall = !!(r4_exit & R4_EXIT_STALL);
+                    after_bail = 0;
+                    continue;
+                }
+                if (unlikely(rec_log != NULL) && (pc != cur + 4 || after_bail)) rec_log_miss(pc);
+                after_bail = 0;
+            }
         }
 
         {

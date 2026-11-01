@@ -12,7 +12,8 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES and N
 | Any other Genesis ROM | Runs on the interpreter |
 | Super Mario Kart (USA), SNES | Recompiled, widescreen races (Mode 7 draws real extra track); ROM loaded with `--rom` |
 | Other SNES ROMs | Run on the interpreter; only DSP-1 cartridges have their extra chip implemented |
-| Super Mario 64 (USA), Nintendo 64 | Runs on the interpreter at about 3x full speed; not recompiled yet, 4:3 only; ROM loaded with `--rom` |
+| Super Mario 64 (USA), Nintendo 64 | Recompiled, about 3.7x full speed; 4:3 only; ROM loaded with `--rom` |
+| Other N64 ROMs | Run on the interpreter; only Super Mario 64 has been tested |
 
 ## Architecture
 
@@ -30,7 +31,7 @@ This is a static recompilation of the Mega Drive / Genesis ROM
 `Street Fighter 2 Plus Champion Edition (J) [!].bin` (T-12033, 3 MB, checksum `FB5E`)
 into a native arm64 macOS program.
 
-The game's 68000 machine code has been translated into C (`generated/recomp_*.c`,
+The game's 68000 machine code has been translated into C (`recomps/genesis/sf2/recomp_*.c`,
 16,525 functions) and compiled with clang. The hardware the game talks to is
 reimplemented in C: the VDP video chip, the YM2612 FM synth, the SN76489 PSG,
 the Z80 sound CPU, the controllers and the bus. A generated 68000 interpreter
@@ -86,7 +87,7 @@ Genexia.app/Contents/MacOS/genexia --rom "roms/Ultimate Mortal Kombat 3 (USA).md
 
 Two games are recompiled to native code: Street Fighter II' SCE and Ultimate
 Mortal Kombat 3 (USA). The app recognises each exact ROM by its header and uses
-the matching code from `generated/` or `generated/umk3/`. Any other ROM runs on
+the matching code from `recomps/genesis/`. Any other ROM runs on
 the built-in 68000 interpreter with the same video and sound chips. Only the
 SF2 code is paired with a built-in ROM, so UMK3 still needs `--rom`.
 
@@ -218,6 +219,12 @@ with Start or B.
 ./Genexia.app/Contents/MacOS/genexia --rom "roms/n64/Super Mario 64 (USA).z64"
 ```
 
+Super Mario 64 is recompiled with `make recompile-sm64` into `recomps/n64/sm64/`:
+one C function per basic block of the game's code. Blocks keep the interpreter's
+cycle counts and leave for the interpreter on anything unusual, so a recompiled run
+matches an interpreted one exactly (`--interp` forces the interpreter). Before a
+block is used, its code is compared with RDRAM, because the game loads overlays.
+
 The R4300i, the RSP (running the game's real graphics and audio microcode) and a
 software RDP are all emulated, so there is no per-game graphics plugin. The CIC-6102
 boot is shortcut, so other games using that chip may boot, but only Super Mario 64
@@ -322,9 +329,8 @@ the audio. `--monkey SEED` plays automatically with random input.
 | `tools/m68kgen.py` | 68000 decoder and C code generator: one description of every instruction, used for both the interpreter and the recompiler |
 | `tools/recompile.py` | Static recompiler: finds code by following control flow from the vectors and jump tables, plus coverage entries, then writes `generated/` and `docs/sf2.lst` |
 | `tools/gen_interp.py` | Generates `src/m68k_interp.c` (1,391 deduplicated opcode handlers) |
-| `generated/` | **The recompiled SF2**: C produced from the ROM's code |
-| `generated/umk3/` | **The recompiled UMK3**, with its own `U_` symbols (`make recompile-umk3`) |
-| `coverage/entries.txt`, `coverage/umk3.txt` | Extra entry points (mostly indirect jump targets) logged by the runtime, per game |
+| `recomps/<console>/<game>/` | **Every recompiled game**: generated C (`recomp_*.c`, never committed) plus `coverage.txt` (addresses only). A game without a folder here runs on the interpreter |
+| `recomps/*/*/coverage.txt` | Extra entry points (mostly indirect jump targets) logged by the runtime, per game |
 | `src/m68k.h`, `src/m68k_core.c` | CPU state, instruction meaning shared by both paths, exceptions, block dispatcher |
 | `src/vdp.c` | VDP: planes, window, sprites, line/column scroll, shadow/highlight, DMA, interrupts, widescreen layout |
 | `src/ym2612.c`, `src/psg.c`, `src/z80.c` | Sound hardware |
@@ -348,5 +354,5 @@ make recompile && make
 
 `make coverage` plays the game headless and logs any address that had to fall
 back to the interpreter. `make recompile && make` then translates those addresses
-too. When you run the game normally, set `SF2_MISSLOG=coverage/entries.txt` to do
+too. When you run the game normally, set `SF2_MISSLOG=recomps/genesis/sf2/coverage.txt` to do
 the same logging.

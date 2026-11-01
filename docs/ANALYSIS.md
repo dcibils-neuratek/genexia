@@ -89,7 +89,7 @@ port 1/2 data at `$A10003/5`, toggling TH to get the extra X/Y/Z/Mode buttons.
   Recursive descent from the vectors finds only 1,652 instructions. Almost all code
   is reached indirectly through task entry points and state tables. The rest came
   from addresses that the runtime logged as interpreter fallbacks while the game
-  played itself. That coverage is saved in `coverage/entries.txt`.
+  played itself. That coverage is saved in `recomps/genesis/sf2/coverage.txt`.
 
 ## How the recompiler translates code
 

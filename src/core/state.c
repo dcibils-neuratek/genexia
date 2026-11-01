@@ -18,6 +18,8 @@ static unsigned long sec_size;
 static const char *sec_name = "__emustate";
 
 /* consoles with large memory keep their state in their own section */
+void (*state_on_load)(void);
+
 void state_use_section(const char *name) { sec_name = name; sec = NULL; }
 
 static void state_init(void)
@@ -27,7 +29,7 @@ static void state_init(void)
 
 size_t state_size(void) { state_init(); return sec_size; }
 void state_save(void *buf) { state_init(); memcpy(buf, sec, sec_size); }
-void state_load(const void *buf) { state_init(); memcpy(sec, buf, sec_size); }
+void state_load(const void *buf) { state_init(); memcpy(sec, buf, sec_size); if (state_on_load) state_on_load(); }
 
 /* file slot: header + raw section; refused if this build's layout differs */
 #define MAGIC 0x53463253u   /* "SF2S" */
@@ -49,7 +51,7 @@ int state_read_file(const char *path)
     u32 hdr[2];
     int ok = fread(hdr, sizeof hdr, 1, f) == 1 && hdr[0] == MAGIC && hdr[1] == sec_size;
     void *buf = ok ? malloc(sec_size) : NULL;
-    if (buf && fread(buf, sec_size, 1, f) == 1) memcpy(sec, buf, sec_size); else ok = 0;
+    if (buf && fread(buf, sec_size, 1, f) == 1) { memcpy(sec, buf, sec_size); if (state_on_load) state_on_load(); } else ok = 0;
     free(buf);
     fclose(f);
     return ok;

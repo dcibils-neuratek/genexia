@@ -10,7 +10,7 @@
 *.smc
 *.gen
 roms/
-generated/
+recomps/**/recomp_*.c
 docs/*.lst
 docs/*.png
 docs/*.wav

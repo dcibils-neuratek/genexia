@@ -6,7 +6,7 @@
  */
 #include <stdlib.h>
 #include <string.h>
-#include "n64.h"
+#include "r4300_recomp.h"
 #include "n64_machine.h"
 #include "m68k.h"              /* rom[] / rom_size */
 #include "bus.h"               /* pad_state */
@@ -38,6 +38,7 @@ N64_STATE static s64 ai_frac;
 static long st_dp_bytes;
 static long st_sp_start, st_dp_lists, st_pi_dma, st_pi_bytes, st_vi, st_si, st_ai_buf;
 void n64_debug_print(void) {
+    r4300_recomp_print();
     fprintf(stderr, "dp bytes in logged window %ld\n", st_dp_bytes);
     fprintf(stderr, "N64: rsp starts %ld, rdp lists %ld, pi dma %ld (%ld KB), vi irq %ld, si %ld, ai bufs %ld, "
             "vi origin %06X w %u type %u, mi_mask %02X, sp_status %03X\n",
@@ -168,6 +169,12 @@ void n64_sp_break(void) {
 int n64_sp_halted(void) { return (sp_status & (SP_HALT | SP_BROKE)) != 0; }
 
 /* ---------------------------------------------------------------- PI */
+void (*n64_register_game)(void);   /* generated: recompiled code for this ROM */
+int n64_force_interp;
+__attribute__((weak)) void recomp_register_sm64(void) {}   /* until recomps/n64/sm64 is generated */
+static FILE *cov_log;
+static u32 *rom_of;                /* SF2_MISSLOG: ROM offset of each RDRAM word */
+
 static void pi_dma_to_rdram(u32 len) {
     u32 d = pi_reg[0] & 0xFFFFFF, c = pi_reg[1] & 0x0FFFFFFF;
     u32 n = (len & 0xFFFFFF) + 1;
@@ -177,6 +184,11 @@ static void pi_dma_to_rdram(u32 len) {
     }
     pi_reg[0] = (d + n) & 0xFFFFFF;
     pi_reg[1] = (pi_reg[1] + n);
+    r4300_code_written(d, n);
+    if (rom_of) {                  /* dev: remember where code comes from */
+        fprintf(cov_log, "D %06X %07X %X\n", d, c, n); fflush(cov_log);
+        for (u32 i = 0; i + 4 <= n; i += 4) rom_of[((d + i) & (N64_RDRAM_SIZE - 1)) >> 2] = c + i;
+    }
     st_pi_dma++; st_pi_bytes += n;
     mi_raise(MI_PI);
 }
@@ -448,7 +460,7 @@ static void vi_output(void) {
 
 /* ---------------------------------------------------------- scheduler */
 #define CYCLES_PER_LINE 5960       /* 93.75 MHz / 60 Hz / 262 lines */
-#define SLICE 400
+#define SLICE 1200
 
 void n64_run_frame(void) {
     for (int line = 0; line < 262; line++) {
@@ -507,6 +519,21 @@ void n64_reset(void) {
     W32(low + 0x310, 0x3F);               /* CIC seed */
     W32(low + 0x318, N64_RDRAM_SIZE);     /* osMemSize */
 
+    static int recomp_ready;
+    if (!recomp_ready) {
+        recomp_ready = 1;
+        if (n64_register_game && !n64_force_interp) { n64_register_game(); r4300_recomp_enable(); }
+        const char *p = getenv("SF2_MISSLOG");
+        if (p && !n64_force_interp) {
+            cov_log = fopen(p, "a");
+            rom_of = calloc(N64_RDRAM_SIZE >> 2, sizeof *rom_of);
+            r4300_recomp_log(cov_log, rom_of);
+        }
+    }
+    if (rom_of) {
+        fprintf(cov_log, "D %06X %07X %X\n", entry & 0x7FFFFF, 0x1000, n);
+        for (u32 i = 0; i + 4 <= n; i += 4) rom_of[((entry & 0x7FFFFF) + i) >> 2] = 0x1000 + i;
+    }
     r4300_reset(entry);
     for (int i = 0; i < 32; i++) r4300_gpr[i] = 0;
     r4300_gpr[19] = 0;                    /* s3: cartridge */
