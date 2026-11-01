@@ -111,7 +111,7 @@ at start-up.
 | Start | Return | Start | 1 |
 | Mode | Right Shift | | |
 
-**Gamepad** (Xbox / PlayStation / Switch Pro and other SDL controllers; first pad = P1, second = P2):
+**Gamepad** (Xbox / PlayStation / Switch Pro and other SDL controllers). The first controller to press a button becomes P1, the next becomes P2:
 
 | Button (Xbox / PlayStation) | Action |
 |---|---|

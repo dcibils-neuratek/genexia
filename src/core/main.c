@@ -992,9 +992,12 @@ int main(int argc, char **argv) {
     if (dev) SDL_PauseAudioDevice(dev, 0);
 
     SDL_GameController *gcs[2] = {0};
+    /* players follow who presses first, not the order macOS lists devices:
+     * the first controller to press a button is P1, the next is P2 */
+    int pad_player[2] = { -1, -1 }, players_taken = 0;
     int ngc = 0;
     for (int i = 0; i < SDL_NumJoysticks() && ngc < 2; i++)
-        if (SDL_IsGameController(i)) { combo_pad_hint[ngc] = 1; gcs[ngc++] = SDL_GameControllerOpen(i); }
+        if (SDL_IsGameController(i)) gcs[ngc++] = SDL_GameControllerOpen(i);
 
     const double frame_s = 1.0 / (53693175.0 / (3420.0 * 262.0));
     u64 freq = SDL_GetPerformanceFrequency();
@@ -1009,6 +1012,13 @@ int main(int argc, char **argv) {
         SDL_Event e;
         if (quit_req) running = 0;
         while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_CONTROLLERBUTTONDOWN)
+                for (int g = 0; g < ngc; g++)
+                    if (gcs[g] && pad_player[g] < 0 && players_taken < 2 &&
+                        SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which) {
+                        pad_player[g] = players_taken++;
+                        combo_pad_hint[pad_player[g]] = 1;
+                    }
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_KEYDOWN && menu_open) {
                 SDL_Scancode c = e.key.keysym.scancode;
@@ -1080,21 +1090,22 @@ int main(int argc, char **argv) {
             else if (e.type == SDL_WINDOWEVENT) refresh_hz = display_refresh(win);
             else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button != SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
                 for (int g = 0; g < ngc; g++)
-                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which) combo_pad_hint[g] = 1;
+                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which && pad_player[g] >= 0) combo_pad_hint[pad_player[g]] = 1;
             }
             else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
                 for (int g = 0; g < ngc; g++)
-                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which) { combo_pad_hint[g] = 1; combo_start(g, 0); }
+                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which && pad_player[g] >= 0) { combo_pad_hint[pad_player[g]] = 1; combo_start(pad_player[g], 0); }
             }
             else if (e.type == SDL_CONTROLLERAXISMOTION && e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT && e.caxis.value > 20000) {
                 for (int g = 0; g < ngc; g++)
-                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.caxis.which) { combo_pad_hint[g] = 1; combo_start(g, 1); }
+                    if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.caxis.which && pad_player[g] >= 0) { combo_pad_hint[pad_player[g]] = 1; combo_start(pad_player[g], 1); }
             }
-            else if (e.type == SDL_CONTROLLERDEVICEADDED && ngc < 2) { combo_pad_hint[ngc] = 1; gcs[ngc++] = SDL_GameControllerOpen(e.cdevice.which); }
+            else if (e.type == SDL_CONTROLLERDEVICEADDED && ngc < 2) gcs[ngc++] = SDL_GameControllerOpen(e.cdevice.which);
         }
         const u8 *k = SDL_GetKeyboardState(NULL);
-        u16 live_pad[2] = { (u16)(keyboard_pad(k, 0) | controller_pad(gcs[0])),
-                            (u16)(keyboard_pad(k, 1) | controller_pad(gcs[1])) };
+        u16 live_pad[2] = { keyboard_pad(k, 0), keyboard_pad(k, 1) };
+        for (int g = 0; g < ngc; g++)
+            if (pad_player[g] >= 0) live_pad[pad_player[g]] |= controller_pad(gcs[g]);
         pad_state[0] = live_pad[0];
         pad_state[1] = live_pad[1];
 
