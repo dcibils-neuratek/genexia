@@ -458,6 +458,7 @@ static void vi_output(void) {
     }
 }
 
+void n64_state_loaded(void) { r4300_recomp_flush(); rdp_hires_resync(); }
 u32 n64_vi_origin(void) { return vi_reg[1] & 0xFFFFFF; }
 
 /* ---------------------------------------------------------- scheduler */

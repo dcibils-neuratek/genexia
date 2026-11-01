@@ -312,17 +312,13 @@ F10 menu. Settings are remembered.
 | Picture shape | All | Square pixels or 4:3 TV shape |
 | Sprite limit | Genesis, SNES | Removes the console's sprite limits, so there's no flicker |
 
-N64 high-resolution rendering never touches what the game sees. Each draw runs twice:
-once normally into console memory, and once scaled up into a separate picture. So game
-behaviour and save states stay identical at every setting. Super Mario 64 on the
-machine it was tested on:
+N64 high-resolution rendering never touches what the game sees. Each draw happens
+twice: once normally into console memory, and once scaled up into a separate picture.
+So game behaviour and save states stay identical at every setting. The scaled-up
+drawing runs on four worker threads, each handling its own bands of scanlines.
 
-| N64 setting | Speed (60 fps is full speed) |
-|---|---|
-| 1x | 274 fps |
-| 2x | 109 fps |
-| 3x | 50 to 63 fps, slightly below full speed |
-| 4x, or 2x with anti-aliasing | 40 fps, too slow for now |
+Super Mario 64 reaches full speed (60 fps) in a live window at 3x, at 4x, and at 2x
+with anti-aliasing. 3x and 4x with anti-aliasing haven't been measured.
 
 From the command line: `--res 1-4`, `--aa 1-2`, `--upscale 0-2`, `--color 0-1`.
 

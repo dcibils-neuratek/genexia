@@ -27,7 +27,8 @@ RUNTIME  := src/core/main.c src/core/state.c src/core/enhance.c \
             src/chips/r4300.c src/chips/rsp.c src/chips/rdp.c src/backends/n64/machine.c
 # recompiled games: recomps/<console>/<game>/, generated code plus coverage.txt
 GEN      := $(sort $(wildcard recomps/*/*/recomp_*.c))
-OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:recomps/%.c=$(BUILD)/gen/%.o)
+RDP_WORKERS := 0 1 2 3
+OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:recomps/%.c=$(BUILD)/gen/%.o) $(RDP_WORKERS:%=$(BUILD)/chips/rdp_w%.o)
 
 # The ROM is built into the executable when the file is present (EMBED=0 to
 # opt out); otherwise the game loads it from disk at start-up.
@@ -49,6 +50,11 @@ HDRS     := $(wildcard src/*.h src/*/*.h src/backends/*/*.h)
 $(BUILD)/%.o: src/%.c $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# the RDP once more per high-res worker, see src/chips/rdp.c
+$(BUILD)/chips/rdp_w%.o: src/chips/rdp.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DRDP_WORKER=$* -c -o $@ $<
 
 $(BUILD)/rom.bin:
 	@mkdir -p $(BUILD)
@@ -109,7 +115,7 @@ tests:
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_sound src/chips/z80.c src/chips/ym2612.c src/chips/psg.c src/chips/test_sound.c -lm && $(BUILD)/test_sound
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_r4300 src/chips/r4300.c src/chips/test_r4300.c && $(BUILD)/test_r4300
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_rsp src/chips/test_rsp.c && $(BUILD)/test_rsp
-	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_rdp src/chips/rdp.c src/chips/test_rdp.c -lm && $(BUILD)/test_rdp
+	$(CC) -O2 -std=c11 $(INCS) -DRDP_NO_WORKERS -o $(BUILD)/test_rdp src/chips/rdp.c src/chips/test_rdp.c -lm && $(BUILD)/test_rdp
 
 clean:
 	rm -rf $(BUILD) genexia Genexia.app

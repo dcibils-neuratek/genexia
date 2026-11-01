@@ -501,7 +501,7 @@ static void configure_game(int region_set) {
         n64_register_game = !strcmp(game_title, "SUPER MARIO 64") && rom[0x10] == 0x63 && rom[0x11] == 0x5A
                             ? recomp_register_sm64 : NULL;
         n64_force_interp = m68k_force_interp || !n64_register_game;
-        state_on_load = r4300_recomp_flush;
+        state_on_load = n64_state_loaded;
         if (!probing) fprintf(stderr, "Game: %s  (Nintendo 64, %s)\n", game_title, n64_force_interp ? "interpreter" : "recompiled");
         return;
     }

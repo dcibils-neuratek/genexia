@@ -6,7 +6,7 @@ const char *n64_load(void);
 extern void (*n64_register_game)(void);
 extern int n64_force_interp;
 void recomp_register_sm64(void);
-void r4300_recomp_flush(void);
+void n64_state_loaded(void);
 u32  n64_vi_origin(void);
 void rdp_set_hires(int n);
 int  rdp_hires_fetch(u32 origin, int aa, u32 *out, int w, int h);

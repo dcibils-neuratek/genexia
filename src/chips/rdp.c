@@ -16,6 +16,10 @@
 #include "n64.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 int rdp_debug;
 #include <string.h>
 
@@ -63,15 +67,32 @@ typedef struct {
     u32  rng;
 } RdpState;
 
+#ifdef RDP_WORKER                  /* see "high-res rendering" below */
+#undef N64_STATE
+#define N64_STATE
+#define HR_MINE(y) ((((y) >> 5) & 3) == RDP_WORKER)
+#else
+#define HR_MINE(y) 1
+#endif
 static RdpState S N64_STATE;
 /* The two extra bits per 16-bit RDRAM word (coverage or low dz bits). */
+#ifdef RDP_WORKER
+static u8 hidden[2];
+#else
 static u8 hidden[N64_RDRAM_SIZE / 2] N64_STATE;
+#endif
 
-/* Enhancement: high-resolution rendering. Every draw runs twice. The first run
- * is the real one, into RDRAM, so the game sees exactly what the console would
- * produce. The second is the same draw scaled up by hr_n into a host buffer
- * that is not emulated state; S is put back afterwards, so nothing the game can
- * observe changes. These pointers select which memory the pixel code touches. */
+/* Enhancement: high-resolution rendering. Every draw happens twice. The real one
+ * goes into RDRAM, so the game sees exactly what the console would produce. The
+ * other is the same draw scaled up by hr_n into a host buffer that is not
+ * emulated state, so nothing the game can observe changes.
+ *
+ * That second draw runs on worker threads. This file is compiled once more per
+ * worker with RDP_WORKER set, which gives each its own S and pipeline tables at
+ * no cost to the pixel loops. Workers read the command stream from a ring, and
+ * each draws only its own bands of scanlines (HR_MINE). Texture loads are not
+ * repeated, as RDRAM may have moved on: the ring carries the resulting S.
+ * These pointers select which memory the pixel code touches. */
 static u8 *R_ram = n64_rdram, *R_hid = hidden;
 static u32 R_mask = AMASK;
 static int hr_n = 1;               /* scale of the draw running now */
@@ -958,6 +979,7 @@ static void draw_tri(const u64 *w, int shade, int tex, int zb) {
         if (!valid) continue;
         if (S.sc_field && (y & 1) != S.sc_odd) continue;
 
+        if (!HR_MINE(y)) continue;
         sp.y = y;
         sp.x0 = minl >> 2;
         sp.x1 = (maxr - 1) >> 2;
@@ -986,7 +1008,7 @@ static void fill_mode_rect(int x0, int y0, int x1, int y1) {
     const u16 hc = (u16)(fill >> 16), lc = (u16)fill;
     const u8 hh = (hc & 1) ? 3 : 0, lh = (lc & 1) ? 3 : 0;
     for (int y = y0; y <= y1; y++) {
-        if (S.sc_field && (y & 1) != S.sc_odd) continue;
+        if ((S.sc_field && (y & 1) != S.sc_odd) || !HR_MINE(y)) continue;
         u32 a = S.fb_addr + ((u32)S.fb_width * (u32)y + (u32)x0) * step;
         for (int x = x0; x <= x1; x++, a += step) {
             if (step == 2) {
@@ -1063,7 +1085,7 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
 
     if (M.cycle == 2) {
         for (int y = y0; y <= y1; y++, sl += (u32)dsy, tl += (u32)dty) {
-            if (S.sc_field && (y & 1) != S.sc_odd) continue;
+            if ((S.sc_field && (y & 1) != S.sc_odd) || !HR_MINE(y)) continue;
             copy_line(y, x0, x1, sl, tl, (u32)dsx, (u32)dtx);
         }
         return;
@@ -1080,7 +1102,7 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
     sp.x0 = sp.full0 = x0;
     sp.x1 = sp.full1 = x1;
     for (int y = y0; y <= y1; y++, sl += (u32)dsy, tl += (u32)dty) {
-        if (S.sc_field && (y & 1) != S.sc_odd) continue;
+        if ((S.sc_field && (y & 1) != S.sc_odd) || !HR_MINE(y)) continue;
         sp.y = y; sp.s = sl; sp.t = tl;
         fn(&sp);
     }
@@ -1181,22 +1203,23 @@ static const u8 cmd_len[64] = {
 /* ------------------------------------------------------- high-res rendering */
 #define HR_POOL  0x10000000u       /* colour is 32-bit, depth 16-bit */
 #define HR_SLOTS 8
-static u8 *hr_mem, *hr_hid;
+#define HR_WORKERS 4
+#define RING_WORDS (1u << 22)      /* u64s */
+enum { RING_CMD, RING_STATE, RING_SCALE, RING_SKIP };   /* entry header: kind << 32 | words */
+extern u8 *rdp_hr_mem, *rdp_hr_hid;
+extern u64 *rdp_ring;
+extern _Atomic u32 rdp_ring_w, rdp_ring_r[HR_WORKERS];
+
+#ifdef RDP_WORKER
+#define PASTE2(a, b) a##b
+#define PASTE(a, b) PASTE2(a, b)
+#define WNAME(x) PASTE(x, RDP_WORKER)
+
 static int hr_want = 1;
 static struct { u32 addr, stamp; int width; } hr_slot[HR_SLOTS];
 static u32 hr_clock;
 
-void rdp_set_hires(int n) {
-    if (n == hr_want) return;
-    hr_want = n;
-    memset(hr_slot, 0, sizeof hr_slot);
-    if (n > 1 && !hr_mem) {        /* untouched pages cost nothing */
-        hr_mem = calloc(HR_POOL, 1);
-        hr_hid = calloc(HR_POOL / 2, 1);
-    }
-}
-
-/* Offset in the pool of the image the game keeps at RDRAM address `addr`. */
+/* Every worker sees the same stream, so all make the same choices here. */
 static u32 hr_image(u32 addr, int width) {
     int best = 0;
     for (int i = 0; i < HR_SLOTS; i++) {
@@ -1211,9 +1234,9 @@ static void exec_cmd(const u64 *w);
 
 static void hr_replay(const u64 *w, int tri) {
     /* smaller targets are textures the game renders for itself */
-    if (S.fb_size < 2 || S.fb_width < 200) return;
+    if (S.fb_size < 2 || S.fb_width < 200 || hr_want < 2) return;
     const int n = hr_want;
-    const u32 fa = S.fb_addr, za = S.z_addr, fill = S.fill, rng = S.rng;
+    const u32 fa = S.fb_addr, za = S.z_addr, fill = S.fill;
     const int fw = S.fb_width, fs = S.fb_size, xh = S.sc_xh, yh = S.sc_yh, xl = S.sc_xl, yl = S.sc_yl, sf = S.sc_field;
     const int depth = fa == za;
     S.fb_addr = hr_image(fa, fw * n);
@@ -1228,59 +1251,173 @@ static void hr_replay(const u64 *w, int tri) {
     }
     S.sc_field = 0;
     if (tri) { S.sc_xh *= n; S.sc_yh *= n; S.sc_xl *= n; S.sc_yl *= n; }
-    hr_n = n; R_ram = hr_mem; R_hid = hr_hid; R_mask = HR_POOL - 1;
+    hr_n = n; R_ram = rdp_hr_mem; R_hid = rdp_hr_hid; R_mask = HR_POOL - 1;
     exec_cmd(w);
-    hr_n = 1; R_ram = n64_rdram; R_hid = hidden; R_mask = AMASK;
-    S.fb_addr = fa; S.z_addr = za; S.fill = fill; S.rng = rng; S.fb_width = fw; S.fb_size = fs;
+    hr_n = 1;
+    S.fb_addr = fa; S.z_addr = za; S.fill = fill; S.fb_width = fw; S.fb_size = fs;
     S.sc_xh = xh; S.sc_yh = yh; S.sc_xl = xl; S.sc_yl = yl; S.sc_field = sf;
 }
 
-/* Copies the high-res image of `origin` into out (0x00RRGGBB), averaging each
- * aa x aa group of pixels. Returns 0 until that image has been drawn. */
-int rdp_hires_fetch(u32 origin, int aa, u32 *out, int w, int h) {
-    origin &= AMASK;
+void *WNAME(rdp_worker)(void *arg) {
+    (void)arg;
+    u32 r = 0;
+    for (;;) {
+        if (r == atomic_load_explicit(&rdp_ring_w, memory_order_acquire)) { usleep(50); continue; }
+        const u64 *e = &rdp_ring[r];
+        const u32 kind = (u32)(e[0] >> 32), words = (u32)e[0];
+        switch (kind) {
+        case RING_CMD:   exec_cmd(e + 1); break;
+        case RING_STATE: memcpy(&S, e + 1, sizeof S); M.valid = 0; break;
+        case RING_SCALE: hr_want = (int)e[1]; memset(hr_slot, 0, sizeof hr_slot); break;
+        default: break;
+        }
+        r = (r + 1 + words) & (RING_WORDS - 1);
+        atomic_store_explicit(&rdp_ring_r[RDP_WORKER], r, memory_order_release);
+    }
+    return NULL;
+}
+
+/* where the image at `addr` lives; used after the workers have finished */
+#if RDP_WORKER == 0
+int rdp_hr_find(u32 origin, u32 *offset, int *width, int *scale) {
     for (int i = 0; i < HR_SLOTS; i++) {
         /* games point the video output a few lines into the image */
         const u32 skip = origin - hr_slot[i].addr;
         if (!hr_slot[i].stamp || skip > 0x2000) continue;
         const int lines = (int)skip / (hr_slot[i].width / hr_want * 2) * hr_want;
-        const size_t stride = (size_t)hr_slot[i].width * 4;
-        const u8 *base = hr_mem + (size_t)i * (HR_POOL / HR_SLOTS) + (size_t)lines * stride;
-        for (int y = 0; y < h; y++) {
-            const u8 *row = base + (size_t)y * aa * stride;
-            for (int x = 0; x < w; x++, row += (size_t)aa * 4) {
-                u32 r = 0, g = 0, b = 0;
-                for (int v = 0; v < aa; v++) {
-                    const u8 *p = row + (size_t)v * stride;
-                    for (int u = 0; u < aa; u++, p += 4) { r += p[0]; g += p[1]; b += p[2]; }
-                }
-                const u32 k = (u32)(aa * aa);
-                *out++ = (r / k) << 16 | (g / k) << 8 | (b / k);
-            }
-        }
+        *offset = (u32)i * (HR_POOL / HR_SLOTS) + (u32)lines * (u32)hr_slot[i].width * 4;
+        *width = hr_slot[i].width; *scale = hr_want;
         return 1;
     }
     return 0;
 }
+#endif
+
+#else /* the game's thread */
+u8 *rdp_hr_mem, *rdp_hr_hid;
+u64 *rdp_ring;
+_Atomic u32 rdp_ring_w, rdp_ring_r[HR_WORKERS];
+static int hr_want = 1, hr_started;
+
+#ifdef RDP_NO_WORKERS
+#define rdp_hr_find(a, b, c, d) 0
+#else
+int rdp_hr_find(u32 origin, u32 *offset, int *width, int *scale);
+void *rdp_worker0(void *), *rdp_worker1(void *), *rdp_worker2(void *), *rdp_worker3(void *);
+#endif
+
+static u32 ring_space(void) {
+    const u32 w = atomic_load_explicit(&rdp_ring_w, memory_order_relaxed);
+    u32 space = RING_WORDS;
+    for (int i = 0; i < HR_WORKERS; i++) {
+        u32 s = (atomic_load_explicit(&rdp_ring_r[i], memory_order_acquire) - w - 1) & (RING_WORDS - 1);
+        if (s < space) space = s;
+    }
+    return space;
+}
+
+/* entries are contiguous: too close to the end, skip over the rest */
+static void ring_put(u32 kind, const void *data, u32 words) {
+    u32 w = atomic_load_explicit(&rdp_ring_w, memory_order_relaxed);
+    const u32 left = RING_WORDS - w;
+    if (left < words + 1) {
+        while (ring_space() < left + words + 2) usleep(20);
+        rdp_ring[w] = (u64)RING_SKIP << 32 | (left - 1);
+        atomic_store_explicit(&rdp_ring_w, 0, memory_order_release);
+        w = 0;
+    }
+    while (ring_space() < words + 2) usleep(20);
+    rdp_ring[w] = (u64)kind << 32 | words;
+    memcpy(&rdp_ring[w + 1], data, words * 8);
+    atomic_store_explicit(&rdp_ring_w, (w + 1 + words) & (RING_WORDS - 1), memory_order_release);
+}
+
+static void ring_drain(void) {
+    const u32 w = atomic_load_explicit(&rdp_ring_w, memory_order_relaxed);
+    for (int i = 0; i < HR_WORKERS; i++)
+        while (atomic_load_explicit(&rdp_ring_r[i], memory_order_acquire) != w) sched_yield();
+}
+
+void rdp_hires_resync(void) {
+    if (hr_want > 1) ring_put(RING_STATE, &S, (sizeof S + 7) / 8);
+}
+
+void rdp_set_hires(int n) {
+    if (n == hr_want) return;
+#ifndef RDP_NO_WORKERS
+    if (n > 1 && !hr_started) {
+        hr_started = 1;
+        rdp_hr_mem = calloc(HR_POOL, 1);        /* untouched pages cost nothing */
+        rdp_hr_hid = calloc(HR_POOL / 2, 1);
+        rdp_ring = calloc(RING_WORDS, 8);
+        void *(*const fn[HR_WORKERS])(void *) = { rdp_worker0, rdp_worker1, rdp_worker2, rdp_worker3 };
+        for (int i = 0; i < HR_WORKERS; i++) {
+            pthread_t t;
+            pthread_create(&t, NULL, fn[i], NULL);
+            pthread_detach(t);
+        }
+    }
+    u64 scale = (u64)n;
+    if (hr_started) ring_put(RING_SCALE, &scale, 1);
+    hr_want = n;
+    rdp_hires_resync();
+#endif
+}
+
+/* Waits for the workers, then copies the high-res image of `origin` into out
+ * (0x00RRGGBB), averaging each aa x aa group of pixels. Returns 0 until that
+ * image has been drawn. */
+int rdp_hires_fetch(u32 origin, int aa, u32 *out, int w, int h) {
+    if (hr_want < 2) return 0;
+    ring_drain();
+    u32 offset; int width, scale;
+    if (!rdp_hr_find(origin & AMASK, &offset, &width, &scale)) return 0;
+    const u8 *base = rdp_hr_mem + offset;
+    const size_t stride = (size_t)width * 4;
+    for (int y = 0; y < h; y++) {
+        const u8 *row = base + (size_t)y * aa * stride;
+        if (aa == 1) {
+            for (int x = 0; x < w; x++, row += 4) *out++ = (u32)row[0] << 16 | (u32)row[1] << 8 | row[2];
+            continue;
+        }
+        for (int x = 0; x < w; x++, row += (size_t)aa * 4) {
+            u32 r = 0, g = 0, b = 0;
+            for (int v = 0; v < aa; v++) {
+                const u8 *p = row + (size_t)v * stride;
+                for (int u = 0; u < aa; u++, p += 4) { r += p[0]; g += p[1]; b += p[2]; }
+            }
+            const u32 k = (u32)(aa * aa);
+            *out++ = (r / k) << 16 | (g / k) << 8 | (b / k);
+        }
+    }
+    return 1;
+}
+#endif /* RDP_WORKER */
 
 static void exec_cmd(const u64 *w) {
     const int op = (int)(w[0] >> 56) & 0x3F;
     if (rdp_debug && op != 0x27 && op != 0x28 && op != 0x29 && op != 0x26) fprintf(stderr, "RDP %02X %08X %08X\n", op, (u32)(w[0] >> 32), (u32)w[0]);
     const u32 hi = HI(w[0]), lo = LO(w[0]);
     if (op >= 0x08 && op <= 0x0F) {
+#ifdef RDP_WORKER
+        if (hr_n == 1) { hr_replay(w, 1); return; }
+#endif
         draw_tri(w, op & 4, op & 2, op & 1);
-        if (hr_want > 1 && hr_n == 1) hr_replay(w, 1);
         return;
     }
     switch (op) {
     case 0x24: case 0x25: {
+#ifdef RDP_WORKER
+        if (hr_n == 1) { hr_replay(w, 0); break; }
+#endif
         u32 a = HI(w[1]), b = LO(w[1]);
         draw_rect((lo >> 12) & 0xFFF, lo & 0xFFF, (hi >> 12) & 0xFFF, hi & 0xFFF, (lo >> 24) & 7,
                   (s16)(a >> 16), (s16)a, (s16)(b >> 16), (s16)b, op & 1);
-        if (hr_want > 1 && hr_n == 1) hr_replay(w, 0);
         break;
     }
+#ifndef RDP_WORKER
     case 0x29: n64_rdp_full_sync(); break;
+#endif
     case 0x2A:
         S.key_w[1] = (hi >> 12) & 0xFFF; S.key_w[2] = hi & 0xFFF;
         S.key_c[1] = (lo >> 24) & 0xFF; S.key_s[1] = (lo >> 16) & 0xFF;
@@ -1301,10 +1438,14 @@ static void exec_cmd(const u64 *w) {
         break;
     case 0x2E: S.prim_z = (lo >> 16) & 0x7FFF; S.prim_dz = lo & 0xFFFF; break;
     case 0x2F: S.om = w[0]; break;
+#ifndef RDP_WORKER
     case 0x30: load_tlut(hi, lo); break;
+#endif
     case 0x32: tile_set_size(&S.tile[(lo >> 24) & 7], hi, lo); break;
+#ifndef RDP_WORKER
     case 0x33: load_block(hi, lo); break;
     case 0x34: load_tile(hi, lo); break;
+#endif
     case 0x35: {
         Tile *t = &S.tile[(lo >> 24) & 7];
         t->fmt = (hi >> 21) & 7; t->size = (hi >> 19) & 3;
@@ -1318,8 +1459,10 @@ static void exec_cmd(const u64 *w) {
         break;
     }
     case 0x36:
+#ifdef RDP_WORKER
+        if (hr_n == 1) { hr_replay(w, 0); break; }
+#endif
         draw_rect((lo >> 12) & 0xFFF, lo & 0xFFF, (hi >> 12) & 0xFFF, hi & 0xFFF, 0, 0, 0, 0, 0, 0);
-        if (hr_want > 1 && hr_n == 1) hr_replay(w, 0);
         break;
     case 0x37: S.fill = lo; break;
     case 0x38: S.fog = lo; break;
@@ -1340,6 +1483,7 @@ static void exec_cmd(const u64 *w) {
     }
 }
 
+#ifndef RDP_WORKER
 void rdp_run(u32 start, u32 end, int xbus) {
     u32 a = start & ~7u, e = end & ~7u;
     while (a < e) {
@@ -1353,6 +1497,11 @@ void rdp_run(u32 start, u32 end, int xbus) {
         if (S.cmd_fill >= need) {
             S.cmd_fill = 0;
             exec_cmd(S.cmd);
+            if (hr_want > 1) {
+                const int op = (int)(S.cmd[0] >> 56) & 0x3F;
+                if (op == 0x30 || op == 0x33 || op == 0x34) rdp_hires_resync();
+                else ring_put(RING_CMD, S.cmd, (u32)need);
+            }
         }
     }
 }
@@ -1368,3 +1517,4 @@ void rdp_reset(void) {
     for (int i = 0; i < 8; i++) tile_derive(&S.tile[i]);
     M.valid = 0;
 }
+#endif /* !RDP_WORKER */
