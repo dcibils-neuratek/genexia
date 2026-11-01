@@ -737,11 +737,12 @@ static int settings_get(const char *key, int def) {
     fclose(f);
     return def;
 }
+static int stats_on;
 static void settings_save(void) {
     FILE *f = fopen(SETTINGS, "w");
     if (!f) return;
-    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\nspeed %d\n", vdp_widescreen, enh_upscale, every_other,
-            enh_color, enh_shape, vdp_no_sprite_limit, speed_pct);
+    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\nspeed %d\nstats %d\n", vdp_widescreen, enh_upscale, every_other,
+            enh_color, enh_shape, vdp_no_sprite_limit, speed_pct, stats_on);
     fclose(f);
 }
 
@@ -879,11 +880,12 @@ static void bar_draw(u32 *fb) {
 }
 
 /* What is running and how fast, on top of the picture. F8. */
-static int stats_on;
 static char stats[3][40];
 static void stats_draw(u32 *fb) {
     const int w = vdp_screen_w, h = vdp_screen_h;
-    fx_box(fb, VDP_FB_STRIDE, w, h, 4, 4, 4 + 190, 4 + 34, 0, 0.66f);
+    int tw = 0;
+    for (int i = 0; i < 3; i++) { const int n = fx_text_width(stats[i], 1); if (n > tw) tw = n; }
+    fx_box(fb, VDP_FB_STRIDE, w, h, 4, 4, 12 + tw, 4 + 34, 0, 0.66f);
     for (int i = 0; i < 3; i++) fx_text(fb, VDP_FB_STRIDE, w, h, stats[i], 8, 8 + i * 10, 1, 0xFFFFFF, 0xFFFFFF);
 }
 
@@ -1106,6 +1108,7 @@ int main(void) {
     enh_shape = settings_get("shape", 1);
     vdp_no_sprite_limit = settings_get("limit", 1);
     set_speed(settings_get("speed", 100));
+    stats_on = settings_get("stats", 1);
 
     const Game *game = game_select();
     if (game) {
@@ -1173,7 +1176,7 @@ int main(void) {
             bar_mouse();
             if (dragged && !bar_drag) settings_save();
         }
-        if (press(0x64)) stats_on = !stats_on;
+        if (press(0x64)) { stats_on = !stats_on; settings_save(); }
         if (press(0x65) | press(0x6D)) {
             menu_run();
             deadline = timebase();
