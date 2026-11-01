@@ -5,7 +5,7 @@
  */
 #ifndef W65816_H
 #define W65816_H
-#include "../genesis.h"
+#include "genesis.h"
 
 typedef struct {
     u16 a, x, y, s, d, pc;

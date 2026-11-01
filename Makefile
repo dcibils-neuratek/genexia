@@ -10,12 +10,20 @@ ROM      ?= Street Fighter 2 Plus Champion Edition (J) [!].bin
 CC       := clang
 SDL_CF   := $(shell sdl2-config --cflags)
 SDL_LD   := $(shell sdl2-config --libs)
-CFLAGS   := -O2 -std=c11 -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter -Isrc $(SDL_CF)
-GENFLAGS := -O1 -std=c11 -w -Isrc
+# core/ = shared front end, chips/ = reusable chips with no console knowledge,
+# backends/<console>/ = what is unique to one console
+INCS     := -Isrc -Isrc/core -Isrc/chips -Isrc/backends/genesis -Isrc/backends/snes
+CFLAGS   := -O2 -std=c11 -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter $(INCS) $(SDL_CF)
+GENFLAGS := -O1 -std=c11 -w $(INCS)
 BUILD    := build
 
-RUNTIME  := src/main.c src/bus.c src/m68k_core.c src/m68k_interp.c src/vdp.c \
-            src/z80.c src/ym2612.c src/psg.c src/state.c src/combo.c src/fx.c
+RUNTIME  := src/core/main.c src/core/state.c \
+            src/chips/m68k_core.c src/chips/m68k_interp.c src/chips/z80.c \
+            src/chips/ym2612.c src/chips/psg.c \
+            src/backends/genesis/bus.c src/backends/genesis/vdp.c \
+            src/backends/genesis/combo.c src/backends/genesis/fx.c \
+            src/chips/w65816.c src/backends/snes/machine.c src/backends/snes/ppu.c \
+            src/backends/snes/apu.c src/backends/snes/dsp1.c
 GEN      := $(sort $(wildcard generated/recomp_*.c generated/*/recomp_*.c))
 OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:generated/%.c=$(BUILD)/gen/%.o)
 
@@ -23,9 +31,9 @@ OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:generated/%.c=$(BUILD)/gen/%.o
 # opt out); otherwise the game loads it from disk at start-up.
 EMBED    ?= $(shell test -f "$(ROM)" && echo 1 || echo 0)
 ifeq ($(EMBED),1)
-OBJS     += $(BUILD)/rom_embed.o $(BUILD)/rom_embed_data.o
+OBJS     += $(BUILD)/core/rom_embed.o $(BUILD)/rom_embed_data.o
 else
-OBJS     += $(BUILD)/rom_none.o
+OBJS     += $(BUILD)/core/rom_none.o
 endif
 
 .PHONY: all recompile recompile-umk3 coverage app tests clean
@@ -35,7 +43,8 @@ all: genexia
 genexia: $(OBJS)
 	$(CC) -o $@ $(OBJS) $(SDL_LD) -lm
 
-$(BUILD)/%.o: src/%.c src/genesis.h src/m68k.h src/bus.h src/combo.h
+HDRS     := $(wildcard src/*.h src/*/*.h src/backends/*/*.h)
+$(BUILD)/%.o: src/%.c $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -43,14 +52,14 @@ $(BUILD)/rom.bin:
 	@mkdir -p $(BUILD)
 	cp "$(ROM)" $@
 
-$(BUILD)/rom_embed_data.o: src/rom_embed.S $(BUILD)/rom.bin
-	$(CC) -c -I$(BUILD) -o $@ src/rom_embed.S
+$(BUILD)/rom_embed_data.o: src/core/rom_embed.S $(BUILD)/rom.bin
+	$(CC) -c -I$(BUILD) -o $@ src/core/rom_embed.S
 
-$(BUILD)/gen/%.o: generated/%.c src/m68k.h src/genesis.h
+$(BUILD)/gen/%.o: generated/%.c src/chips/m68k.h src/genesis.h
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -c -o $@ $<
 
-src/m68k_interp.c: tools/m68kgen.py tools/gen_interp.py
+src/chips/m68k_interp.c: tools/m68kgen.py tools/gen_interp.py
 	python3 tools/gen_interp.py $@
 
 recompile:
@@ -84,8 +93,10 @@ app: genexia
 
 tests:
 	@mkdir -p $(BUILD)
-	$(CC) -O2 -std=c11 -Isrc -o $(BUILD)/test_vdp src/vdp.c src/test_vdp.c && $(BUILD)/test_vdp
-	$(CC) -O2 -std=c11 -Isrc -o $(BUILD)/test_sound src/z80.c src/ym2612.c src/psg.c src/test_sound.c -lm && $(BUILD)/test_sound
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_vdp src/backends/genesis/vdp.c src/backends/genesis/test_vdp.c && $(BUILD)/test_vdp
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_ppu src/backends/snes/ppu.c src/backends/snes/test_ppu.c && $(BUILD)/test_ppu | tail -1
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_apu src/backends/snes/apu.c src/backends/snes/dsp1.c src/backends/snes/test_apu.c -lm && $(BUILD)/test_apu | tail -1
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_sound src/chips/z80.c src/chips/ym2612.c src/chips/psg.c src/chips/test_sound.c -lm && $(BUILD)/test_sound
 
 clean:
 	rm -rf $(BUILD) genexia Genexia.app

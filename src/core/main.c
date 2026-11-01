@@ -18,6 +18,9 @@
 #include "bus.h"
 #include "state.h"
 #include "combo.h"
+#include "backend.h"
+#include "snes.h"
+#include "machine.h"
 
 extern u64 m68k_blocks_run, m68k_interp_run;
 
@@ -34,6 +37,7 @@ int sys_line_cycle(void) {
 /* ------------------------------------------------------------- audio */
 #define AUD_MAX 4096
 static s16 ym_buf[AUD_MAX * 2];
+static const Backend *be;               /* active console */
 static s16 psg_buf[AUD_MAX];
 EMU_STATE static int aud_n;                   /* native samples generated this frame */
 EMU_STATE static s64 aud_cyc;                 /* 68k cycle up to which audio is generated */
@@ -78,14 +82,14 @@ EMU_STATE static double rs_pos;
 EMU_STATE static s16 rs_last[2];
 static int resample(void) {
     int out = 0;
-    double step = (double)YM_SAMPLE_RATE / HOST_RATE * speed_pct / 100.0 * audio_rate_adjust;
+    double step = (double)be->sample_rate / HOST_RATE * speed_pct / 100.0 * audio_rate_adjust;
     while (rs_pos < aud_n && out < AUD_MAX) {
         int i = (int)rs_pos;
         double fr = rs_pos - i;
         for (int ch = 0; ch < 2; ch++) {
             int a = (i == 0 && fr < 0) ? rs_last[ch] : ym_buf[i * 2 + ch] + psg_buf[i];
             int b = (i + 1 < aud_n) ? ym_buf[(i + 1) * 2 + ch] + psg_buf[i + 1] : a;
-            int v = (int)((a + (b - a) * fr) * 4.0);
+            int v = (int)((a + (b - a) * fr) * be->gain);
             if (v > 32767) v = 32767;
             if (v < -32768) v = -32768;
             host_buf[out * 2 + ch] = (s16)v;
@@ -101,7 +105,18 @@ static int resample(void) {
 
 /* ------------------------------------------------------------- frame */
 #define SLICES 4
-static void run_frame(void) {
+
+static void run_frame_snes(void) {
+    snes_run_frame();
+    int room = AUD_MAX - aud_n;
+    int n = snes_apu_take(ym_buf + aud_n * 2, room);
+    if (n > 0) {
+        memset(psg_buf + aud_n, 0, (size_t)n * sizeof(s16));
+        if (!audio_discard) aud_n += n; 
+    }
+}
+
+static void run_frame_genesis(void) {
     EMU_STATE static s64 z80_debt;
     EMU_STATE static s64 sched = -1;      /* absolute 68k-cycle timeline: exactly 488 per line */
     if (sched < 0 || cpu.cyc - sched > 4 * M68K_CYCLES_PER_LINE) sched = cpu.cyc;
@@ -162,6 +177,7 @@ static void monkey_input(unsigned *rng, int f) {
     }
 }
 
+static void run_frame(void) { be->run_frame(); }
 static void power_on(void);
 static void save_ppm(const char *path);
 
@@ -443,7 +459,21 @@ static int load_rom(const char *path) {
 /* Which game is this? The generated code and the SF2 enhancements only
  * apply to that exact ROM; anything else runs on the interpreter. */
 static char game_title[64];
+static void reset_genesis(void);
+static void reset_snes(void) { vdp_init(); snes_reset(); }
+static const Backend backend_genesis = { "Genesis", YM_SAMPLE_RATE, 4.0, reset_genesis, run_frame_genesis };
+static const Backend backend_snes = { "SNES", SNES_DSP_RATE, 1.8, reset_snes, run_frame_snes };
+
 static void configure_game(int region_set) {
+    be = &backend_genesis;
+    if (memcmp(rom + 0x100, "SEGA", 4) && snes_detect()) {
+        be = &backend_snes;
+        game_is_sf2 = 0; vdp_hud_rules = 0;
+        m68k_register_game = NULL;
+        snprintf(game_title, sizeof game_title, "%s", snes_load());
+        fprintf(stderr, "Game: %s  (SNES, interpreter)\n", game_title);
+        return;
+    }
     u16 hdr = (u16)(rom[0x18E] << 8 | rom[0x18F]);
     game_is_sf2 = hdr == 0xFB5E && !memcmp(rom + 0x180, "GM T-12033", 10);
     /* pick the recompiled code that belongs to this exact ROM, if any */
@@ -479,7 +509,8 @@ static void configure_game(int region_set) {
             m68k_register_game && !m68k_force_interp ? "recompiled" : "interpreter", region_version);
 }
 
-static void power_on(void) {
+static void power_on(void) { be->reset(); }
+static void reset_genesis(void) {
     bus_reset();
     vdp_init();
     z80_reset();
@@ -673,7 +704,7 @@ static const char *menu_value(int i, char *b, size_t n) {
     static const char *filters[] = { "Sharp", "Smooth", "Scanlines", "CRT" };
     static const char *strengths[] = { "Soft", "Medium", "Strong" };
     switch (i) {
-    case M_WIDE:     return vdp_widescreen ? "16:9" : "Off";
+    case M_WIDE:     return be == &backend_snes ? "-" : vdp_widescreen ? "16:9" : "Off";
     case M_FILTER:   return filters[video_filter];
     case M_STRENGTH: return video_filter >= FILTER_SCANLINES ? strengths[scan_strength] : "-";
     case M_SHAPE:    return vdp_widescreen ? "-" : pic_shape ? "TV 4:3" : "Square pixels";
@@ -685,7 +716,7 @@ static const char *menu_value(int i, char *b, size_t n) {
 }
 static void menu_change(int i, int dir) {
     switch (i) {
-    case M_WIDE:     vdp_widescreen = !vdp_widescreen; menu_dirty = 1; break;
+    case M_WIDE:     if (be != &backend_snes) { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; } break;
     case M_FILTER:   video_filter = (video_filter + dir + FILTER_COUNT) % FILTER_COUNT; break;
     case M_STRENGTH: scan_strength = (scan_strength + dir + 3) % 3; break;
     case M_SHAPE:    pic_shape = !pic_shape; break;
@@ -857,6 +888,10 @@ int main(int argc, char **argv) {
                 if (presses[i].frame <= f && f < presses[i].frame + 6) b[presses[i].player] |= presses[i].buttons;
             pad_state[0] = b[0];
             pad_state[1] = b[1];
+            if (getenv("SF2_HOLD")) {          /* dev: start,end,buttons held on P1 */
+                int h0, h1; char hb[16];
+                if (sscanf(getenv("SF2_HOLD"), "%d,%d,%15s", &h0, &h1, hb) == 3 && f >= h0 && f < h1) pad_state[0] |= parse_buttons(hb);
+            }
             if (state_at && f == state_at && !st_buf && !st_pass) {   /* determinism check mid-game */
                 st_buf = malloc(state_size()); state_save(st_buf); st_monkey = monkey; st_mk = mk;
             }
@@ -992,7 +1027,7 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_ESCAPE: running = 0; break;
                 case SDL_SCANCODE_P: paused = !paused; break;
                 case SDL_SCANCODE_F1: power_on(); break;
-                case SDL_SCANCODE_F2: vdp_widescreen = !vdp_widescreen; break;
+                case SDL_SCANCODE_F2: if (be != &backend_snes) vdp_widescreen = !vdp_widescreen; break;
                 case SDL_SCANCODE_F3: video_filter = (video_filter + 1) % FILTER_COUNT; break;
                 case SDL_SCANCODE_F10: menu_open = 1; menu_sel = 0; break;
                 case SDL_SCANCODE_F4: vdp_no_sprite_limit = !vdp_no_sprite_limit; break;

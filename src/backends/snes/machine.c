@@ -6,9 +6,9 @@
 #include <string.h>
 #include "snes.h"
 #include "machine.h"
-#include "../chips/w65816.h"
-#include "../m68k.h"     /* rom[] / rom_size */
-#include "../bus.h"      /* pad_state */
+#include "w65816.h"
+#include "m68k.h"     /* rom[] / rom_size */
+#include "bus.h"      /* pad_state */
 
 /* ------------------------------------------------------------- state */
 EMU_STATE static u8 wram[0x20000];

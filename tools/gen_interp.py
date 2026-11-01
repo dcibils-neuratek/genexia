@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from m68kgen import decode
 
-out_path = sys.argv[1] if len(sys.argv) > 1 else 'src/m68k_interp.c'
+out_path = sys.argv[1] if len(sys.argv) > 1 else 'src/chips/m68k_interp.c'
 bodies = {}
 table = []
 for op in range(65536):

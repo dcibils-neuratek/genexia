@@ -11,7 +11,7 @@
  */
 #ifndef SNES_H
 #define SNES_H
-#include "../genesis.h"          /* u8..s64, EMU_STATE, vdp_framebuffer, vdp_skip_render */
+#include "genesis.h"          /* u8..s64, EMU_STATE, vdp_framebuffer, vdp_skip_render */
 
 #define SNES_MASTER_PER_LINE 1364
 #define SNES_LINES_PER_FRAME 262

@@ -1,15 +1,29 @@
 # Genexia
 
-**Genexia is a Genesis / Mega Drive recompilation platform for macOS.** It
-translates a game's 68000 code into native Mac code and runs it on reimplemented
-console hardware. Any Genesis ROM runs through `--rom`; recompiled games also get
-widescreen and other enhancements.
+**Genexia is a console recompilation platform for macOS.** It translates a game's
+code into native Mac code and runs it on reimplemented console hardware, with one
+shared front end for every console: video filters, options menu, controls, speed,
+run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
 
 | Game | Status |
 |---|---|
 | Street Fighter II' Special Champion Edition | Recompiled and built in; widescreen, killer combos, mana |
 | Ultimate Mortal Kombat 3 (USA) | Recompiled; widescreen; ROM loaded with `--rom` |
 | Any other Genesis ROM | Runs on the interpreter |
+| Super Mario Kart (USA), SNES | Playable on the interpreter (not recompiled yet); ROM loaded with `--rom` |
+| Other SNES ROMs | Run on the interpreter; only DSP-1 cartridges have their extra chip implemented |
+
+## Architecture
+
+| Folder | What goes there |
+|---|---|
+| `src/core/` | Shared front end: window, filters, menu, input, audio output, pacing, run-ahead, save states, and the `Backend` interface (`backend.h`) |
+| `src/chips/` | Reusable chips with no console knowledge: 68000, Z80, 65C816, YM2612, PSG. Each talks to the machine through callbacks, so a new console reuses them directly |
+| `src/backends/<console>/` | Only what is unique to one console: memory map, video chip, wiring, frame timing |
+| `tools/` | Recompiler pipeline |
+
+Every emulated variable is tagged `EMU_STATE`, which is why save states and
+run-ahead work on every backend without per-chip code.
 
 This is a static recompilation of the Mega Drive / Genesis ROM
 `Street Fighter 2 Plus Champion Edition (J) [!].bin` (T-12033, 3 MB, checksum `FB5E`)
