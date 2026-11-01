@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 project(GenexiaOS9 C)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
-file(GLOB RECOMP ${ROOT}/recomps/genesis/sf2/recomp_*.c)
+file(GLOB RECOMP ${ROOT}/recomps/genesis/sf2/recomp_*.c ${ROOT}/recomps/genesis/umk3/recomp_*.c)
 
 add_application(Genexia
     os9_main.c
@@ -12,6 +12,7 @@ add_application(Genexia
     ${ROOT}/src/chips/m68k_core.c ${ROOT}/src/chips/m68k_interp.c ${ROOT}/src/chips/z80.c
     ${ROOT}/src/chips/ym2612.c ${ROOT}/src/chips/psg.c
     ${ROOT}/src/backends/genesis/bus.c ${ROOT}/src/backends/genesis/vdp.c
+    ${ROOT}/src/backends/genesis/fx.c ${ROOT}/src/backends/genesis/combo.c ${ROOT}/src/core/enhance.c
     ${RECOMP})
 
 target_compile_definitions(Genexia PRIVATE GENEXIA_OS9)

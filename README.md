@@ -343,12 +343,26 @@ quits. `--rom` skips the selector.
 ## Mac OS 9
 
 `src/platforms/os9` is a small front end for PowerPC Macs on Mac OS 9, built with
-[Retro68](https://github.com/autc04/Retro68). It runs the same Genesis core and
-recompiled Street Fighter II, with a Toolbox window, the Sound Manager and the
-keyboard, and has no enhancements or save states. F1 draws every other line, which is faster. F2 is full screen, switching the display to 640 x 480 through DrawSprocket, and F3 sets up a gamepad through InputSprocket. Both are loaded from the system at run time. `make os9` leaves
-`build/os9/Genexia.dsk`, with the app and `sf2.bin` when the ROM is present. Keep
-the two files in one folder on the Mac. Keys are arrows, Z X C, A S D, Return for
-Start and Esc to quit. The title bar shows the frame rate, and `genexia.log` beside the app records it every second. `make os9-push` sends a build to a machine with File Sharing and guest access on, and `make os9-log` reads its log.
+[Retro68](https://github.com/autc04/Retro68). It runs the same Genesis core, with a
+Toolbox window, the Sound Manager and the keyboard. `make os9` leaves
+`build/os9/Genexia.dsk`, with the app and `sf2.bin` when the ROM is present.
+
+It starts at a game selector listing every Genesis ROM (`.bin`, `.md`, `.gen`) next
+to the app or in a `roms` folder there. Street Fighter II' and Ultimate Mortal
+Kombat 3 are recompiled into the app; anything else runs on the interpreter, which
+is much slower on these machines.
+
+Keys are arrows, Z X C, A S D, Return for Start and Esc to quit. F9 or F10 opens the
+options menu: full screen, widescreen, Scale2x, scanlines, Vivid colour, picture
+shape and the sprite limit. Settings are kept in `genexia.cfg`. Run-ahead, save
+states and game speed aren't available here. F1 toggles scanlines, which is also faster. F2 is full
+screen at the display's own size, at 16 bits through DrawSprocket, with the picture
+scaled to fill a 4:3 screen, or letterboxed in widescreen. F3 sets up a gamepad
+through InputSprocket. Both are loaded from the system at run time.
+
+The title bar shows the frame rate, and `genexia.log` beside the app records it every
+second. `make os9-push` sends a build to a machine with File Sharing and guest access
+on, and `make os9-log` reads its log.
 
 Every build has a number: the commit count and commit, with `+` when it was
 built from uncommitted code. It is in the window title, at the top right of the
