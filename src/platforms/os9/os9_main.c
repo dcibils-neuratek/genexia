@@ -48,9 +48,13 @@ static volatile u32 ring_w, ring_r;
 static u32 rs_pos;                   /* 16.16 position in the native samples */
 static const u32 rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) / OUT_RATE);
 
+static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
+static u32 t_vdp, t_68k, t_z80, t_ym;     /* where a frame goes, for the log */
+
 static void audio_render_to(s64 t) {
     s64 n = (t - aud_cyc) / 144;
     if (n <= 0) return;
+    const u32 t0 = timebase();
     if (aud_n + n > FRAME_SAMPLES) n = FRAME_SAMPLES - aud_n;
     if (n > 0) {
         ym2612_render(ym_buf + aud_n * 2, (int)n);
@@ -58,6 +62,7 @@ static void audio_render_to(s64 t) {
         aud_n += (int)n;
     }
     aud_cyc += ((t - aud_cyc) / 144) * 144;
+    t_ym += timebase() - t0;
 }
 void audio_sync_68k(void) { audio_render_to(cpu.cyc); }
 void audio_sync_z80(void) { audio_render_to(z80_now68); }
@@ -117,12 +122,18 @@ static void run_frame(void) {
     static s64 z80_debt, sched = -1;
     if (sched < 0 || cpu.cyc - sched > 4 * M68K_CYCLES_PER_LINE) sched = cpu.cyc;
     for (int line = 0; line < LINES_PER_FRAME; line++) {
+        const u32 t0 = timebase();
         vdp_begin_line(line);
+        const u32 t1 = timebase();
+        t_vdp += t1 - t0;
         z80_set_irq(vdp_zint_pending());
         line_start_cyc = sched;
         const s64 line_end = sched + M68K_CYCLES_PER_LINE;
         const s64 from = cpu.cyc < line_end ? cpu.cyc : line_end - 1;
+        const u32 ym0 = t_ym;
         m68k_run(line_end);
+        const u32 t2 = timebase(), ym1 = t_ym;
+        t_68k += t2 - t1 - (ym1 - ym0);
         z80_debt += Z80_CYCLES_PER_LINE;
         if (!z80_busreq && !z80_reset_line) {
             const s64 total = z80_debt;
@@ -138,6 +149,7 @@ static void run_frame(void) {
         }
         z80_now68 = line_end;
         sched = line_end;
+        t_z80 += timebase() - t2 - (t_ym - ym1);
         audio_render_to(sched);
     }
     audio_flush();
@@ -182,8 +194,6 @@ static int area_w = 640, area_h = 480;   /* the window, or the whole screen */
 
 static int in_front = 1, every_other, video_path;   /* video_path: last screen depth drawn to, 0 = system copy */
 static int enh_upscale, enh_color, enh_shape = 1;   /* shape: 1 fills 4:3, 0 square pixels */
-
-static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
 
 #define SRC_W 852                    /* widest picture: 426 columns after Scale2x */
 #define SRC_H 480
@@ -1062,6 +1072,10 @@ int main(void) {
                          every_other ? " alt-lines" : "", dsp_port ? " full640" : full_screen ? " full" : "", snd_chan ? "on" : "off",
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
+                const u32 p = all / 100 + 1;
+                snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p));
+                log_line(l);
+                t_68k = t_z80 = t_vdp = t_ym = 0;
             }
             shown = ran = 0;
             t_emu = t_vid = t_events = t_other = t_worst = 0;
