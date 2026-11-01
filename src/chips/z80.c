@@ -10,7 +10,11 @@
  */
 #include "genesis.h"
 
+#if defined(__BIG_ENDIAN__) || defined(__ppc__) || defined(__powerpc__)
+typedef union { u16 w; struct { u8 h, l; } b; } Pair;
+#else
 typedef union { u16 w; struct { u8 l, h; } b; } Pair;
+#endif
 
 EMU_STATE static Pair AF, BC, DE, HL, IX, IY, SP, PC, WZ;
 EMU_STATE static Pair AF2, BC2, DE2, HL2;

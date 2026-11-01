@@ -39,6 +39,10 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
+.PHONY: FORCE os9 all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
+
+all: genexia
+
 # Build number: commits so far and the commit, + when the code had uncommitted
 # changes. Shown in the window title, the options menu and by --version.
 BUILD_NO := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
@@ -49,10 +53,6 @@ $(BUILD)/version.h: FORCE
 	@cmp -s $@.new $@ || cp $@.new $@
 	@rm -f $@.new
 $(BUILD)/core/main.o: $(BUILD)/version.h
-
-.PHONY: FORCE all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
-
-all: genexia
 
 genexia: $(OBJS)
 	$(CC) -o $@ $(OBJS) $(SDL_LD) -lm
@@ -118,6 +118,20 @@ app: genexia
 	codesign --force -s - --deep Genexia.app
 	@if [ "$(EMBED)" = 1 ]; then echo "Genexia.app is self-contained (ROM built in)"; \
 	 else echo "No ROM embedded: put it next to the app or in Genexia.app/Contents/MacOS/ as sf2.bin"; fi
+
+# Mac OS 9 on PowerPC, with Retro68 (RETRO68 = its build folder). Leaves
+# build/os9/Genexia.dsk: an HFS disk with the app and, when ROM exists, sf2.bin.
+RETRO68 ?= $(HOME)/retro68-work/Retro68-build
+os9: $(BUILD)/version.h
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake -S src/platforms/os9 -B $(BUILD)/os9/cmake \
+	  -DCMAKE_TOOLCHAIN_FILE=$(RETRO68)/toolchain/powerpc-apple-macos/cmake/retroppc.toolchain.cmake
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake --build $(BUILD)/os9/cmake -- -j8
+	cp $(BUILD)/os9/cmake/Genexia.bin $(BUILD)/os9/Genexia.bin
+	dd if=/dev/zero of=$(BUILD)/os9/Genexia.dsk bs=1m count=32 2>/dev/null
+	PATH="$(RETRO68)/toolchain/bin:$$PATH"; hformat -l Genexia $(BUILD)/os9/Genexia.dsk >/dev/null && \
+	  hcopy -m $(BUILD)/os9/Genexia.bin :Genexia && \
+	  { [ ! -f "$(ROM)" ] || hcopy -r "$(ROM)" :sf2.bin; } && humount
+	@ls -l $(BUILD)/os9/Genexia.dsk
 
 tests:
 	@mkdir -p $(BUILD)

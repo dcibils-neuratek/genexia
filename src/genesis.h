@@ -23,7 +23,18 @@ typedef uint64_t u64; typedef int64_t s64;
 /* Every variable that is part of the emulated machine's state is tagged
  * EMU_STATE: the linker gathers them into one section, so a save state is a
  * single memcpy of that section (state.c). Host-side data stays outside. */
+#ifdef __MACH__
 #define EMU_STATE __attribute__((section("__DATA,__emustate")))
+#else
+#define EMU_STATE                  /* the classic Mac build has no save states */
+#endif
+
+/* biggest cartridge: 64 MB for the N64; the classic Mac build is Genesis only */
+#ifdef GENEXIA_OS9
+#define ROM_MAX 0x400000
+#else
+#define ROM_MAX 0x4000000
+#endif
 
 #define M68K_CLOCK      7670453
 #define Z80_CLOCK       3579545

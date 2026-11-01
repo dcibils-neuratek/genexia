@@ -6,7 +6,7 @@
 #include "m68k.h"
 #include "bus.h"
 
-u8  rom[0x4000000];
+u8  rom[ROM_MAX];
 EMU_STATE u8  ram[0x10000];
 u32 rom_size;
 
