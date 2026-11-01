@@ -448,6 +448,7 @@ static int load_rom(const char *path) {
         fclose(f);
     }
     if (rom_size < 0x200) return 0;
+    if (memcmp(rom + 0x100, "SEGA", 4)) return 1;   /* the checks below are Genesis-only */
     u32 sum = 0;
     for (u32 i = 0x200; i + 1 < rom_size; i += 2) sum += (u32)(rom[i] << 8 | rom[i + 1]);
     u16 want = (u16)(rom[0x18E] << 8 | rom[0x18F]);
