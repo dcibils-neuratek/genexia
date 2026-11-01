@@ -903,7 +903,9 @@ int main(int argc, char **argv) {
             }
             if (monkey) monkey_input(&monkey, f);
             { extern int vdp_layout_debug; vdp_layout_debug = getenv("SF2_LAYOUT") && f == atoi(getenv("SF2_LAYOUT")); }
+            vdp_skip_render = getenv("SF2_LIVELIKE") != NULL;   /* dev: as the window loop does */
             run_frame();
+            vdp_skip_render = 0;
             if (getenv("SF2_HEADLESS_RA")) run_ahead_frames();
             if (st_buf && f >= state_at && f < state_at + 900) {
                 if (st_pass == 0) st_h1 = st_h1 * 31 + ram_hash(); else st_h2 = st_h2 * 31 + ram_hash();
@@ -995,9 +997,14 @@ int main(int argc, char **argv) {
     /* players follow who presses first, not the order macOS lists devices:
      * the first controller to press a button is P1, the next is P2 */
     int pad_player[2] = { -1, -1 }, players_taken = 0;
+    u32 player_last_press[2] = { 0, 0 };
     int ngc = 0;
     for (int i = 0; i < SDL_NumJoysticks() && ngc < 2; i++)
-        if (SDL_IsGameController(i)) gcs[ngc++] = SDL_GameControllerOpen(i);
+        if (SDL_IsGameController(i)) {
+            gcs[ngc] = SDL_GameControllerOpen(i);
+            fprintf(stderr, "Controller found: '%s'\n", SDL_GameControllerName(gcs[ngc]));
+            ngc++;
+        }
 
     const double frame_s = 1.0 / (53693175.0 / (3420.0 * 262.0));
     u64 freq = SDL_GetPerformanceFrequency();
@@ -1013,12 +1020,25 @@ int main(int argc, char **argv) {
         if (quit_req) running = 0;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_CONTROLLERBUTTONDOWN)
-                for (int g = 0; g < ngc; g++)
-                    if (gcs[g] && pad_player[g] < 0 && players_taken < 2 &&
-                        SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.cbutton.which) {
+                for (int g = 0; g < ngc; g++) {
+                    if (!gcs[g] || SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) != e.cbutton.which) continue;
+                    if (pad_player[g] < 0 && players_taken < 2) {
                         pad_player[g] = players_taken++;
                         combo_pad_hint[pad_player[g]] = 1;
+                        fprintf(stderr, "Controller '%s' is Player %d\n", SDL_GameControllerName(gcs[g]), pad_player[g] + 1);
                     }
+                    u32 now_ms = SDL_GetTicks();
+                    /* some pads appear as several devices and a duplicate can
+                     * claim P1: the pad in use takes P1 once P1 has gone idle */
+                    if (pad_player[g] == 1 && now_ms - player_last_press[0] > 10000) {
+                        int other = !g;
+                        pad_player[g] = 0;
+                        if (pad_player[other] == 0) pad_player[other] = 1;
+                        combo_pad_hint[0] = 1;
+                        fprintf(stderr, "Controller '%s' is now Player 1 (previous Player 1 was idle)\n", SDL_GameControllerName(gcs[g]));
+                    }
+                    if (pad_player[g] >= 0) player_last_press[pad_player[g]] = now_ms;
+                }
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_KEYDOWN && menu_open) {
                 SDL_Scancode c = e.key.keysym.scancode;
@@ -1100,7 +1120,11 @@ int main(int argc, char **argv) {
                 for (int g = 0; g < ngc; g++)
                     if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.caxis.which && pad_player[g] >= 0) { combo_pad_hint[pad_player[g]] = 1; combo_start(pad_player[g], 1); }
             }
-            else if (e.type == SDL_CONTROLLERDEVICEADDED && ngc < 2) gcs[ngc++] = SDL_GameControllerOpen(e.cdevice.which);
+            else if (e.type == SDL_CONTROLLERDEVICEADDED && ngc < 2) {
+                gcs[ngc] = SDL_GameControllerOpen(e.cdevice.which);
+                fprintf(stderr, "Controller connected: '%s'\n", SDL_GameControllerName(gcs[ngc]));
+                ngc++;
+            }
         }
         const u8 *k = SDL_GetKeyboardState(NULL);
         u16 live_pad[2] = { keyboard_pad(k, 0), keyboard_pad(k, 1) };
