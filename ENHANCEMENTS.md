@@ -47,12 +47,12 @@ Status: ✅ done · 🚧 in progress · ⬜ planned
 | ⬜ | 6 | Pixel-art upscalers | xBRZ / ScaleFX style edge smoothing |
 | ⬜ | 7 | Full widescreen on every stage | Extend background art where stages run out at the edges |
 
-| ✅ | N64 high resolution | Draws replayed at 2x to 4x into 32-bit host buffers; game state unchanged, checked over 3,900 frames. Full speed up to 4x on four worker threads |
+| ✅ | N64 high resolution | Draws replayed at 2x to 4x into 32-bit host buffers; game state unchanged, checked over 3,900 frames. Full speed up to 4x on six worker threads |
 | ✅ | N64 anti-aliasing | 4x SSAA on top of the render resolution; 2x with anti-aliasing runs at full speed |
 | ✅ | Pixel art upscaler | Scale2x and Scale4x for Genesis and SNES |
 | ✅ | Vivid colour | Saturation boost on every console |
 | ✅ | Enhancements screen | F9, or from the F10 menu; settings saved |
-| ⬜ | N64 ultrawide | Patch the game's projection and culling and anchor the HUD, up to 21:9; the RDP already draws any shape |
+| ✅ | N64 ultrawide | 16:9 and 21:9 (3440x1440 shape) from the menu or `--aspect 1-2`. Perspective matrices widened each frame, side culling lifted in Super Mario 64 (USA), HUD stays centred at its own shape. 60 fps at 2x, about 57 at 3x; needs 2x or more, and Fast3D games only |
 
 ## Sound
 

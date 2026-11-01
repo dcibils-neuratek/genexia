@@ -70,7 +70,7 @@ typedef struct {
 #ifdef RDP_WORKER                  /* see "high-res rendering" below */
 #undef N64_STATE
 #define N64_STATE
-#define HR_MINE(y) ((((y) >> 5) & 3) == RDP_WORKER)
+#define HR_MINE(y) (((y) >> 5) % 6 == RDP_WORKER)
 #else
 #define HR_MINE(y) 1
 #endif
@@ -96,6 +96,8 @@ static u8 hidden[N64_RDRAM_SIZE / 2] N64_STATE;
 static u8 *R_ram = n64_rdram, *R_hid = hidden;
 static u32 R_mask = AMASK;
 static int hr_n = 1;               /* scale of the draw running now */
+static s32 hr_xq = 1 << 16;        /* its x scale, 16.16: wider than hr_n when stretched */
+static int hr_off;                 /* first high-res column of a centred draw */
 
 /* ---------------------------------------------------- derived pipeline state */
 typedef void (*SampleFn)(const Tile *, s32, s32, Col *);
@@ -859,8 +861,7 @@ static void draw_tri(const u64 *w, int shade, int tex, int zb) {
 
     s32 yl = sx(hi & 0x3FFF, 14), ym = sx(lo >> 16, 14), yh = sx(lo, 14);
     u32 xl = (u32)sx(HI(w[1]), 30), xh0 = (u32)sx(HI(w[2]), 30), xm0 = (u32)sx(HI(w[3]), 30);
-    const s32 dxl_s = sx(LO(w[1]), 30), dxh_s = sx(LO(w[2]), 30), dxm_s = sx(LO(w[3]), 30);
-    const u32 dxl = (u32)((dxl_s >> 2) & ~1), dxh = (u32)((dxh_s >> 2) & ~1), dxm = (u32)((dxm_s >> 2) & ~1);
+    s32 dxl_s = sx(LO(w[1]), 30), dxh_s = sx(LO(w[2]), 30), dxm_s = sx(LO(w[3]), 30);
 
     /* attribute planes */
     v4 v0 = v4s(0), de = v4s(0), dy = v4s(0);
@@ -891,19 +892,28 @@ static void draw_tri(const u64 *w, int shade, int tex, int zb) {
         dzde = (s32)HI(b[1]); dzdy = (s32)LO(b[1]);
     }
     if (hr_n > 1) {
-        /* Edges keep their slopes when x and y scale together. Attribute steps
-         * shrink, and the start values move to the first high-res scanline. */
+        /* Edges keep their slopes when x and y scale together, and take the
+         * rest of the stretch when x scales further. Attribute steps shrink,
+         * and the start values move to the first high-res scanline. */
         const int n = hr_n, e = ((yh * n) >> 2) - (yh >> 2) * n;
-        xh0 = xh0 * (u32)n + (u32)e * (u32)dxh_s;
-        xm0 = xm0 * (u32)n + (u32)e * (u32)dxm_s;
-        xl *= (u32)n; yl *= n; ym *= n; yh *= n;
-        P.drgba = P.drgba / v4s(n); de = de / v4s(n); dy = dy / v4s(n);
-        dsdx /= n; dtdx /= n; dwdx /= n; dzdx /= n;
+        const s64 xq = hr_xq, nq = (s64)n << 16;
+        const u32 off = (u32)hr_off << 16;
+        dxh_s = (s32)(dxh_s * xq / nq); dxm_s = (s32)(dxm_s * xq / nq); dxl_s = (s32)(dxl_s * xq / nq);
+        xh0 = (u32)(((s32)xh0 * xq) >> 16) + off + (u32)e * (u32)dxh_s;
+        xm0 = (u32)(((s32)xm0 * xq) >> 16) + off + (u32)e * (u32)dxm_s;
+        xl = (u32)(((s32)xl * xq) >> 16) + off;
+        yl *= n; ym *= n; yh *= n;
+        for (int i = 0; i < 4; i++) P.drgba[i] = (s32)(P.drgba[i] * (s64)65536 / xq);
+        de = de / v4s(n); dy = dy / v4s(n);
+#define XSTEP(v) v = (s32)((v) * (s64)65536 / xq)
+        XSTEP(dsdx); XSTEP(dtdx); XSTEP(dwdx); XSTEP(dzdx);
+#undef XSTEP
         dsde /= n; dtde /= n; dwde /= n; dzde /= n;
         dsdy /= n; dtdy /= n; dwdy /= n; dzdy /= n;
         v0 += de * e;
         s0 += (u32)(dsde * e); t0 += (u32)(dtde * e); w0 += (u32)(dwde * e); z0 += (u32)(dzde * e);
     }
+    const u32 dxl = (u32)((dxl_s >> 2) & ~1), dxh = (u32)((dxh_s >> 2) & ~1), dxm = (u32)((dxm_s >> 2) & ~1);
     P.ds = (u32)dsdx; P.dt = (u32)dtdx; P.dw = (u32)dwdx; P.dz = (u32)dzdx;
     P.dsy = (u32)dsdy; P.dty = (u32)dtdy; P.dwy = (u32)dwdy;
     if (P.zsel) {
@@ -1069,7 +1079,10 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
     if (y1 > cy1) y1 = cy1;
     if (x0 > x1 || y0 > y1) return;
     const int nx0 = x0, ny0 = y0, n = hr_n;
-    if (n > 1) { x0 *= n; y0 *= n; x1 = (x1 + 1) * n - 1; y1 = (y1 + 1) * n - 1; }
+    if (n > 1) {
+        x0 = (int)(((s64)x0 * hr_xq) >> 16) + hr_off; y0 *= n;
+        x1 = (int)(((s64)(x1 + 1) * hr_xq) >> 16) + hr_off - 1; y1 = (y1 + 1) * n - 1;
+    }
 
     if (M.cycle == 3) { fill_mode_rect(x0, y0, x1, y1); return; }
 
@@ -1081,7 +1094,8 @@ static void draw_rect(int xh, int yh, int xl, int yl, int tile,
     s32 xq = (nx0 << 2) - xh;
     u32 sl = sb + (u32)(((s64)dsx * xq) >> 2) + (u32)(ny0 - (yh >> 2)) * (u32)dsy;
     u32 tl = tb + (u32)(((s64)dtx * xq) >> 2) + (u32)(ny0 - (yh >> 2)) * (u32)dty;
-    dsx /= n; dtx /= n; dsy /= n; dty /= n;
+    dsx = (s32)(dsx * (s64)65536 / hr_xq); dtx = (s32)(dtx * (s64)65536 / hr_xq);
+    dsy /= n; dty /= n;
 
     if (M.cycle == 2) {
         for (int y = y0; y <= y1; y++, sl += (u32)dsy, tl += (u32)dty) {
@@ -1201,11 +1215,11 @@ static const u8 cmd_len[64] = {
 };
 
 /* ------------------------------------------------------- high-res rendering */
-#define HR_POOL  0x10000000u       /* colour is 32-bit, depth 16-bit */
+#define HR_POOL  0x20000000u       /* colour is 32-bit, depth 16-bit */
 #define HR_SLOTS 8
-#define HR_WORKERS 4
+#define HR_WORKERS 6
 #define RING_WORDS (1u << 22)      /* u64s */
-enum { RING_CMD, RING_STATE, RING_SCALE, RING_SKIP };   /* entry header: kind << 32 | words */
+enum { RING_CMD, RING_STATE, RING_SCALE, RING_SKIP, RING_FRAME };   /* entry header: kind << 32 | words */
 extern u8 *rdp_hr_mem, *rdp_hr_hid;
 extern u64 *rdp_ring;
 extern _Atomic u32 rdp_ring_w, rdp_ring_r[HR_WORKERS];
@@ -1215,22 +1229,49 @@ extern _Atomic u32 rdp_ring_w, rdp_ring_r[HR_WORKERS];
 #define PASTE(a, b) PASTE2(a, b)
 #define WNAME(x) PASTE(x, RDP_WORKER)
 
-static int hr_want = 1;
-static struct { u32 addr, stamp; int width; } hr_slot[HR_SLOTS];
+static int hr_want = 1, hr_wide = 320;   /* hr_wide: image width per 320 console pixels */
+static int frame_3d, seen_z;       /* see hr_stretch() */
+static struct { u32 addr, stamp; int width, native; } hr_slot[HR_SLOTS];
 static u32 hr_clock;
 
 /* Every worker sees the same stream, so all make the same choices here. */
-static u32 hr_image(u32 addr, int width) {
+static u32 hr_image(u32 addr, int width, int native) {
     int best = 0;
     for (int i = 0; i < HR_SLOTS; i++) {
         if (hr_slot[i].stamp && hr_slot[i].addr == addr) { hr_slot[i].stamp = ++hr_clock; return (u32)i * (HR_POOL / HR_SLOTS); }
         if (hr_slot[i].stamp < hr_slot[best].stamp) best = i;
     }
-    hr_slot[best].addr = addr; hr_slot[best].width = width; hr_slot[best].stamp = ++hr_clock;
+    hr_slot[best].addr = addr; hr_slot[best].width = width; hr_slot[best].native = native; hr_slot[best].stamp = ++hr_clock;
     return (u32)best * (HR_POOL / HR_SLOTS);
 }
 
 static void exec_cmd(const u64 *w);
+
+/* Wide pictures. The game's projection was widened, so its 3D arrives squeezed
+ * into 4:3 and this stretches it back out over the wider image. A frame's sky
+ * and clears come before its first depth-tested triangle and go with it;
+ * what follows without depth is the HUD, which stays centred at its own shape.
+ * Anything reaching a side of the screen is a full-screen effect, and is
+ * stretched even then. Screens with no 3D are simply centred. */
+static int hr_stretch(const u64 *w, int tri, int fw) {
+    const u32 hi = HI(w[0]), lo = LO(w[0]);
+    if (!tri) {
+        if ((int)((lo >> 12) & 0xFFF) <= 8 && (int)((hi >> 12) & 0xFFF) >= (fw - 2) << 2) return 1;
+        return frame_3d && !seen_z;
+    }
+    if (frame_3d && ((hi >> 24) & 1)) { seen_z = 1; return 1; }
+    if (frame_3d && !seen_z) return 1;
+    const s64 xl = sx(HI(w[1]), 30), xh = sx(HI(w[2]), 30), xm = sx(HI(w[3]), 30);
+    const s64 tall = sx(hi & 0x3FFF, 14) - sx(lo, 14);
+    const s64 xb = xh + (s64)sx(LO(w[2]), 30) * tall / 4;
+    s64 a = xl < xh ? xl : xh, b = xl < xh ? xh : xl;
+    if (xm < a) a = xm;
+    if (xm > b) b = xm;
+    if (xb < a) a = xb;
+    if (xb > b) b = xb;
+    const int left = a < 2 << 16, right = b >= (s64)(fw - 2) << 16;
+    return frame_3d ? left || right : left && right;
+}
 
 static void hr_replay(const u64 *w, int tri) {
     /* smaller targets are textures the game renders for itself */
@@ -1239,9 +1280,12 @@ static void hr_replay(const u64 *w, int tri) {
     const u32 fa = S.fb_addr, za = S.z_addr, fill = S.fill;
     const int fw = S.fb_width, fs = S.fb_size, xh = S.sc_xh, yh = S.sc_yh, xl = S.sc_xl, yl = S.sc_yl, sf = S.sc_field;
     const int depth = fa == za;
-    S.fb_addr = hr_image(fa, fw * n);
-    S.z_addr = hr_image(za, fw * n);
-    S.fb_width = fw * n;
+    const int fwn = fw * hr_wide / 320;
+    if (hr_stretch(w, tri, fw)) { hr_xq = (s32)(((s64)fwn << 16) / fw); hr_off = 0; }
+    else { hr_xq = n << 16; hr_off = (fwn - fw * n) / 2; }
+    S.fb_addr = hr_image(fa, fwn, fw);
+    S.z_addr = hr_image(za, fwn, fw);
+    S.fb_width = fwn;
     if (!depth) {                  /* colour goes 32-bit: no dithering, no banding */
         if (fs == 2) {
             u32 c = fill >> 16, r = (c >> 11) & 31, g = (c >> 6) & 31, b = (c >> 1) & 31;
@@ -1250,10 +1294,14 @@ static void hr_replay(const u64 *w, int tri) {
         S.fb_size = 3;
     }
     S.sc_field = 0;
-    if (tri) { S.sc_xh *= n; S.sc_yh *= n; S.sc_xl *= n; S.sc_yl *= n; }
+    if (tri) {
+        S.sc_xh = (int)(((s64)S.sc_xh * hr_xq) >> 16) + hr_off * 4; S.sc_yh *= n;
+        S.sc_xl = S.sc_xl >= (fw - 1) << 2 ? fwn << 2 : (int)(((s64)S.sc_xl * hr_xq) >> 16) + hr_off * 4;
+        S.sc_yl *= n;
+    }
     hr_n = n; R_ram = rdp_hr_mem; R_hid = rdp_hr_hid; R_mask = HR_POOL - 1;
     exec_cmd(w);
-    hr_n = 1;
+    hr_n = 1; hr_xq = 1 << 16; hr_off = 0;
     S.fb_addr = fa; S.z_addr = za; S.fill = fill; S.fb_width = fw; S.fb_size = fs;
     S.sc_xh = xh; S.sc_yh = yh; S.sc_xl = xl; S.sc_yl = yl; S.sc_field = sf;
 }
@@ -1268,7 +1316,8 @@ void *WNAME(rdp_worker)(void *arg) {
         switch (kind) {
         case RING_CMD:   exec_cmd(e + 1); break;
         case RING_STATE: memcpy(&S, e + 1, sizeof S); M.valid = 0; break;
-        case RING_SCALE: hr_want = (int)e[1]; memset(hr_slot, 0, sizeof hr_slot); break;
+        case RING_SCALE: hr_want = (int)e[1]; hr_wide = (int)e[2]; memset(hr_slot, 0, sizeof hr_slot); break;
+        case RING_FRAME: frame_3d = (int)e[1]; seen_z = 0; break;
         default: break;
         }
         r = (r + 1 + words) & (RING_WORDS - 1);
@@ -1284,7 +1333,7 @@ int rdp_hr_find(u32 origin, u32 *offset, int *width, int *scale) {
         /* games point the video output a few lines into the image */
         const u32 skip = origin - hr_slot[i].addr;
         if (!hr_slot[i].stamp || skip > 0x2000) continue;
-        const int lines = (int)skip / (hr_slot[i].width / hr_want * 2) * hr_want;
+        const int lines = (int)skip / (hr_slot[i].native * 2) * hr_want;
         *offset = (u32)i * (HR_POOL / HR_SLOTS) + (u32)lines * (u32)hr_slot[i].width * 4;
         *width = hr_slot[i].width; *scale = hr_want;
         return 1;
@@ -1297,13 +1346,13 @@ int rdp_hr_find(u32 origin, u32 *offset, int *width, int *scale) {
 u8 *rdp_hr_mem, *rdp_hr_hid;
 u64 *rdp_ring;
 _Atomic u32 rdp_ring_w, rdp_ring_r[HR_WORKERS];
-static int hr_want = 1, hr_started;
+static int hr_want = 1, hr_wide = 320, hr_started;
 
 #ifdef RDP_NO_WORKERS
 #define rdp_hr_find(a, b, c, d) 0
 #else
 int rdp_hr_find(u32 origin, u32 *offset, int *width, int *scale);
-void *rdp_worker0(void *), *rdp_worker1(void *), *rdp_worker2(void *), *rdp_worker3(void *);
+void *rdp_worker0(void *), *rdp_worker1(void *), *rdp_worker2(void *), *rdp_worker3(void *), *rdp_worker4(void *), *rdp_worker5(void *);
 #endif
 
 static u32 ring_space(void) {
@@ -1342,26 +1391,32 @@ void rdp_hires_resync(void) {
     if (hr_want > 1) ring_put(RING_STATE, &S, (sizeof S + 7) / 8);
 }
 
-void rdp_set_hires(int n) {
-    if (n == hr_want) return;
+/* `wide` is the image width for a 320-pixel console picture */
+void rdp_set_hires(int n, int wide) {
+    if (n == hr_want && wide == hr_wide) return;
 #ifndef RDP_NO_WORKERS
     if (n > 1 && !hr_started) {
         hr_started = 1;
         rdp_hr_mem = calloc(HR_POOL, 1);        /* untouched pages cost nothing */
         rdp_hr_hid = calloc(HR_POOL / 2, 1);
         rdp_ring = calloc(RING_WORDS, 8);
-        void *(*const fn[HR_WORKERS])(void *) = { rdp_worker0, rdp_worker1, rdp_worker2, rdp_worker3 };
+        void *(*const fn[HR_WORKERS])(void *) = { rdp_worker0, rdp_worker1, rdp_worker2, rdp_worker3, rdp_worker4, rdp_worker5 };
         for (int i = 0; i < HR_WORKERS; i++) {
             pthread_t t;
             pthread_create(&t, NULL, fn[i], NULL);
             pthread_detach(t);
         }
     }
-    u64 scale = (u64)n;
-    if (hr_started) ring_put(RING_SCALE, &scale, 1);
-    hr_want = n;
+    const u64 scale[2] = { (u64)n, (u64)wide };
+    if (hr_started) ring_put(RING_SCALE, scale, 2);
+    hr_want = n; hr_wide = wide;
     rdp_hires_resync();
 #endif
+}
+
+void rdp_wide_frame(int is_3d) {
+    const u64 v = (u64)is_3d;
+    if (hr_want > 1) ring_put(RING_FRAME, &v, 1);
 }
 
 /* Waits for the workers, then copies the high-res image of `origin` into out

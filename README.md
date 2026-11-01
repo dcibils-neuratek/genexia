@@ -315,12 +315,19 @@ F10 menu. Settings are remembered.
 N64 high-resolution rendering never touches what the game sees. Each draw happens
 twice: once normally into console memory, and once scaled up into a separate picture.
 So game behaviour and save states stay identical at every setting. The scaled-up
-drawing runs on four worker threads, each handling its own bands of scanlines.
+drawing runs on six worker threads, each handling its own bands of scanlines.
 
 Super Mario 64 reaches full speed (60 fps) in a live window at 3x, at 4x, and at 2x
 with anti-aliasing. 3x and 4x with anti-aliasing haven't been measured.
 
-From the command line: `--res 1-4`, `--aa 1-2`, `--upscale 0-2`, `--color 0-1`.
+From the command line: `--res 1-4`, `--aa 1-2`, `--upscale 0-2`, `--color 0-1`, `--aspect 0-2`.
+
+Ultrawide (N64) shows more of the world rather than stretching it. Each frame the
+display list is read before the RSP gets it and perspective projections are
+narrowed in x, which widens the view. The high-res replay stretches that picture
+back over a wider image, and leaves the HUD centred at its own shape. Super Mario
+64 (USA) also gets its side culling lifted, so objects don't vanish at the new
+edges. The wide picture only exists in the replay, so it starts at 2x.
 
 ### Choosing a game
 

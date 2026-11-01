@@ -27,7 +27,7 @@ RUNTIME  := src/core/main.c src/core/state.c src/core/enhance.c \
             src/chips/r4300.c src/chips/rsp.c src/chips/rdp.c src/backends/n64/machine.c
 # recompiled games: recomps/<console>/<game>/, generated code plus coverage.txt
 GEN      := $(sort $(wildcard recomps/*/*/recomp_*.c))
-RDP_WORKERS := 0 1 2 3
+RDP_WORKERS := 0 1 2 3 4 5
 OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:recomps/%.c=$(BUILD)/gen/%.o) $(RDP_WORKERS:%=$(BUILD)/chips/rdp_w%.o)
 
 # The ROM is built into the executable when the file is present (EMBED=0 to

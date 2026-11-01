@@ -687,16 +687,17 @@ static void crt_build(SDL_Renderer *ren, int w, int h, int lines) {
     SDL_SetTextureBlendMode(crt_tex, SDL_BLENDMODE_MOD);
 }
 
-static void crt_draw(SDL_Renderer *ren, SDL_Texture *tex, const SDL_Rect *src, const SDL_Rect *dst) {
+/* cols x lines is the console's picture, whatever the size of the texture */
+static void crt_draw(SDL_Renderer *ren, SDL_Texture *tex, const SDL_Rect *src, const SDL_Rect *dst, int cols, int lines) {
     /* 1: horizontal softness (full CRT only) */
     if (video_filter == FILTER_CRT) {
-        SDL_FRect d1 = { dst->x + (float)dst->w / src->w * 0.5f, (float)dst->y, (float)dst->w, (float)dst->h };
+        SDL_FRect d1 = { dst->x + (float)dst->w / cols * 0.5f, (float)dst->y, (float)dst->w, (float)dst->h };
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
         SDL_SetTextureAlphaMod(tex, 110);
         SDL_RenderCopyF(ren, tex, src, &d1);
     }
     /* 2: scanlines + mask */
-    crt_build(ren, dst->w, dst->h, src->h);
+    crt_build(ren, dst->w, dst->h, lines);
     if (crt_tex) SDL_RenderCopy(ren, crt_tex, NULL, dst);
     /* 3: glow */
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_ADD);
@@ -709,6 +710,15 @@ static void crt_draw(SDL_Renderer *ren, SDL_Texture *tex, const SDL_Rect *src, c
 /* ------------------------------------------------------------ settings */
 static char settings_path[4200];
 static int enh_res = 1, enh_aa = 1, enh_upscale, enh_color;   /* see enhance_frame() */
+static int enh_aspect;             /* N64: 0 4:3, 1 16:9, 2 ultrawide */
+static const double n64_aspects[3] = { 4.0 / 3.0, 16.0 / 9.0, 43.0 / 18.0 };   /* 3440 x 1440 */
+/* a wide picture exists only in the high-res replay */
+static int n64_res(void) { return enh_aspect && enh_res < 2 ? 2 : enh_res; }
+static int n64_width(void) { return ((int)(320 * n64_res() * n64_aspects[enh_aspect] * 0.75 + 1)) & ~1; }
+static void n64_video(void) {
+    rdp_set_hires(n64_res() * enh_aa, n64_width() * enh_aa);
+    n64_set_wide(n64_aspects[enh_aspect]);
+}
 static int settings_get(const char *key, int def) {
     FILE *f = settings_path[0] ? fopen(settings_path, "r") : NULL;
     if (!f) return def;
@@ -720,7 +730,7 @@ static int settings_get(const char *key, int def) {
 /* widescreen and sprite limit are remembered per game */
 static char key_wide[32], key_limit[32];
 static void settings_save(void) {
-    if (!settings_path[0]) return;
+    if (!settings_path[0] || getenv("SF2_NOSAVE")) return;     /* dev runs leave the player's settings */
     /* keep other games' entries */
     char keep[256][80]; int n = 0;
     FILE *f = fopen(settings_path, "r");
@@ -733,8 +743,8 @@ static void settings_save(void) {
     }
     f = fopen(settings_path, "w");
     if (!f) return;
-    fprintf(f, "filter %d\nstrength %d\nshape %d\nrunahead %d\nspeed %d\nres %d\naa %d\nupscale %d\ncolor %d\n%s %d\n%s %d\n",
-            video_filter, scan_strength, pic_shape, runahead, speed_pct, enh_res, enh_aa, enh_upscale, enh_color,
+    fprintf(f, "filter %d\nstrength %d\nshape %d\nrunahead %d\nspeed %d\nres %d\naa %d\nupscale %d\ncolor %d\naspect %d\n%s %d\n%s %d\n",
+            video_filter, scan_strength, pic_shape, runahead, speed_pct, enh_res, enh_aa, enh_upscale, enh_color, enh_aspect,
             key_wide, vdp_widescreen, key_limit, vdp_no_sprite_limit);
     for (int i = 0; i < n; i++) fprintf(f, "%s\n", keep[i]);
     fclose(f);
@@ -756,9 +766,10 @@ static const char *menu_value(int i, char *b, size_t n) {
     static const char *filters[] = { "Sharp", "Smooth", "Scanlines", "CRT" };
     static const char *strengths[] = { "Soft", "Medium", "Strong" };
     switch (i) {
-    case M_WIDE:     return be == &backend_n64 ? "-" : vdp_widescreen ? "16:9" : "Off";
+    case M_WIDE:     if (be == &backend_n64) { static const char *const a[3] = { "4:3", "16:9", "Ultrawide 21:9" }; return a[enh_aspect]; }
+                     return vdp_widescreen ? "16:9" : "Off";
     case M_RES:      if (be != &backend_n64) return "-";
-                     snprintf(b, n, "%dx  (%d x %d)", enh_res, 320 * enh_res, 240 * enh_res); return b;
+                     snprintf(b, n, "%dx  (%d x %d)", n64_res(), n64_width(), 240 * n64_res()); return b;
     case M_AA:       if (be != &backend_n64) return "-";
                      if (enh_aa == 1) return "Off";
                      snprintf(b, n, "%dx SSAA", enh_aa * enh_aa); return b;
@@ -776,7 +787,9 @@ static const char *menu_value(int i, char *b, size_t n) {
 }
 static void menu_change(int i, int dir) {
     switch (i) {
-    case M_WIDE:     if (be != &backend_n64) { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; } break;
+    case M_WIDE:     if (be == &backend_n64) enh_aspect = (enh_aspect + dir + 3) % 3;
+                     else { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; }
+                     break;
     case M_RES:      if (be == &backend_n64) enh_res = (enh_res - 1 + dir + 4) % 4 + 1; break;
     case M_AA:       if (be == &backend_n64) enh_aa = 3 - enh_aa; break;
     case M_UPSCALE:  if (be != &backend_n64) enh_upscale = (enh_upscale + dir + 3) % 3; break;
@@ -849,9 +862,9 @@ static const u32 *enhance_frame(int *pw, int *ph) {
     int w = sw, h = sh;
     if (!buf) { buf = malloc(4096 * 2048 * 4); tmp = malloc(4096 * 2048 * 4); }
     if (be == &backend_n64) {
-        rdp_set_hires(enh_res * enh_aa);
-        if (enh_res * enh_aa > 1) {
-            w = sw * enh_res; h = sh * enh_res;
+        n64_video();
+        if (n64_res() * enh_aa > 1) {
+            w = n64_width() * sw / 320; h = sh * n64_res();
             if (rdp_hires_fetch(n64_vi_origin(), enh_aa, buf, w, h)) out = buf;
             else { w = sw; h = sh; }
         }
@@ -1099,7 +1112,7 @@ int main(int argc, char **argv) {
         if (pref) { snprintf(settings_path, sizeof settings_path, "%ssettings.txt", pref); SDL_free(pref); }
         video_filter = settings_get("filter", video_filter) % FILTER_COUNT;
         scan_strength = settings_get("strength", scan_strength) % 3;
-        enh_res = settings_get("res", 1); enh_aa = settings_get("aa", 1);
+        enh_res = settings_get("res", 1); enh_aa = settings_get("aa", 1); enh_aspect = settings_get("aspect", 0);
         enh_upscale = settings_get("upscale", 0); enh_color = settings_get("color", 0);
         pic_shape = settings_get("shape", pic_shape) & 1;
         runahead = settings_get("runahead", runahead) % 3;
@@ -1111,6 +1124,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--wide")) wide_opt = 1;
         else if (!strcmp(argv[i], "--no-wide")) wide_opt = 0;
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) enh_res = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) enh_aspect = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--aa") && i + 1 < argc) enh_aa = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--upscale") && i + 1 < argc) enh_upscale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--color") && i + 1 < argc) enh_color = atoi(argv[++i]);
@@ -1218,7 +1232,7 @@ int main(int argc, char **argv) {
             { extern int vdp_layout_debug; vdp_layout_debug = getenv("SF2_LAYOUT") && f == atoi(getenv("SF2_LAYOUT")); }
             { extern int rdp_debug; rdp_debug = getenv("SF2_RDPLOG") && f == atoi(getenv("SF2_RDPLOG")); }
             { extern int n64_dl_log; if (getenv("SF2_RDPLOG")) { int t = atoi(getenv("SF2_RDPLOG")); if (f == t - 2) n64_dl_log = 2; if (f > t) n64_dl_log = 0; } }
-            if (enh_res * enh_aa > 1 && be == &backend_n64) rdp_set_hires(enh_res * enh_aa);
+            if (be == &backend_n64) n64_video();
             vdp_skip_render = getenv("SF2_LIVELIKE") != NULL;   /* dev: as the window loop does */
             run_frame();
             vdp_skip_render = 0;
@@ -1556,7 +1570,7 @@ int main(int argc, char **argv) {
             SDL_RenderSetViewport(ren, NULL);
             /* widescreen: TV-correct 16:9 (game width * 4/3 always fills it);
              * otherwise the original square-pixel picture */
-            double aspect = vdp_widescreen ? 16.0 / 9.0 : pic_shape ? 4.0 / 3.0 : (double)vdp_screen_w / vdp_screen_h;
+            double aspect = be == &backend_n64 ? n64_aspects[enh_aspect] : vdp_widescreen ? 16.0 / 9.0 : pic_shape ? 4.0 / 3.0 : (double)vdp_screen_w / vdp_screen_h;
             SDL_Rect dst;
             if ((double)ow / oh > aspect) { dst.h = oh; dst.w = (int)(oh * aspect + 0.5); }
             else { dst.w = ow; dst.h = (int)(ow / aspect + 0.5); }
@@ -1567,7 +1581,8 @@ int main(int argc, char **argv) {
             SDL_SetTextureAlphaMod(show, 255);
             SDL_SetTextureScaleMode(show, video_filter == FILTER_SMOOTH || enhanced_now ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
             SDL_RenderCopy(ren, show, &src, &dst);
-            if (video_filter >= FILTER_SCANLINES) crt_draw(ren, show, &src, &dst);
+            if (video_filter >= FILTER_SCANLINES)
+                crt_draw(ren, show, &src, &dst, src.w * vdp_screen_h / src.h, vdp_screen_h);
         }
         if (SDL_GetTicks() < osd_until || dragging) draw_osd(ren, win);
         if (speed_pct != last_speed) {

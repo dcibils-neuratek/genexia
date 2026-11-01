@@ -15,6 +15,8 @@ N64_STATE u8 n64_rdram[N64_RDRAM_SIZE];
 N64_STATE u8 n64_sp_mem[0x2000];
 
 #define R32(p)    ((u32)(p)[0] << 24 | (u32)(p)[1] << 16 | (u32)(p)[2] << 8 | (p)[3])
+#define R16(p)    ((u16)((p)[0] << 8 | (p)[1]))
+#define W16(p, v) ((p)[0] = (u8)((v) >> 8), (p)[1] = (u8)(v))
 #define W32(p, v) ((p)[0] = (u8)((v) >> 24), (p)[1] = (u8)((v) >> 16), (p)[2] = (u8)((v) >> 8), (p)[3] = (u8)(v))
 
 enum { MI_SP = 1, MI_SI = 2, MI_AI = 4, MI_VI = 8, MI_PI = 16, MI_DP = 32 };
@@ -68,7 +70,50 @@ static void sp_dma(u32 lenreg, int to_rdram) {
     sp_reg[to_rdram ? 3 : 2] = 0xFF8u | (skip << 20);
 }
 
-/* dev: walk a Fast3D display list the way the microcode would */
+/* Enhancement: wide 3D. Every frame the display list is read before the RSP
+ * gets it, and perspective projections are narrowed in x. That widens the view;
+ * the replay in rdp.c then stretches the squeezed picture over the wide image.
+ * Game logic doesn't read these matrices back, so nothing else notices.
+ * A matrix may be used twice or live for many frames: wide_seen stops it being
+ * scaled again. */
+static s64 wide_k;                 /* 16.16 factor on x, 0 = off */
+static int wide_3d;
+static struct { u32 pa, value; } wide_seen[32];
+static int wide_next;
+
+/* Super Mario 64 (USA) skips objects outside the original view: its two side
+ * checks become plain branches. */
+static const struct { u32 pa, normal, wide; } wide_code[] = {
+    { 0x27D6A0, 0x45000003, 0x10000003 },
+    { 0x27D6D4, 0x45000003, 0x10000003 },
+};
+
+void n64_set_wide(double aspect) {
+    wide_k = aspect > 4.0 / 3.0 ? (s64)(65536.0 * (4.0 / 3.0) / aspect) : 0;
+}
+
+static s32 mtx_get(u32 pa, int i) {
+    return (s32)((u32)R16(&n64_rdram[pa + (u32)i * 2]) << 16 | R16(&n64_rdram[pa + 32 + (u32)i * 2]));
+}
+static void mtx_put(u32 pa, int i, s32 v) {
+    W16(&n64_rdram[pa + (u32)i * 2], (u16)((u32)v >> 16));
+    W16(&n64_rdram[pa + 32 + (u32)i * 2], (u16)v);
+}
+static void wide_matrix(u32 pa) {
+    if (pa + 64 > N64_RDRAM_SIZE) return;
+    /* the perspective signature; orthographic HUD matrices don't have it */
+    if (mtx_get(pa, 11) >= 0 || mtx_get(pa, 15) != 0 || mtx_get(pa, 3) != 0 || mtx_get(pa, 7) != 0) return;
+    wide_3d = 1;
+    const s32 m00 = mtx_get(pa, 0);
+    for (int i = 0; i < 32; i++)
+        if (wide_seen[i].pa == pa && (s32)wide_seen[i].value == m00) return;
+    for (int i = 0; i < 16; i += 4) mtx_put(pa, i, (s32)(((s64)mtx_get(pa, i) * wide_k) >> 16));
+    wide_seen[wide_next].pa = pa;
+    wide_seen[wide_next].value = (u32)mtx_get(pa, 0);
+    wide_next = (wide_next + 1) & 31;
+}
+
+/* walk a Fast3D display list the way the microcode would */
 int n64_dl_log;
 static u32 seg_base[16];
 static void dl_walk(u32 addr, int depth, long *c) {
@@ -83,6 +128,9 @@ static void dl_walk(u32 addr, int depth, long *c) {
         else if (op == 0x06) {            /* G_DL */
             if (depth < 18) dl_walk(w1, depth + 1, c);
             if ((w0 >> 16) & 1) return;
+        } else if (op == 0x01) {          /* G_MTX, on the projection stack */
+            if (wide_k && ((w0 >> 16) & 1))
+                wide_matrix((seg_base[(w1 >> 24) & 15] + (w1 & 0xFFFFFF)) & 0x7FFFFC);
         } else if (op == 0xB8) return;    /* G_ENDDL */
     }
 }
@@ -97,8 +145,25 @@ static void sp_task_debug(void) {
             dl, c[0x04], c[0xBF], c[0x06], c[0xFD], c[0xF3], c[0xE4], R32(&n64_sp_mem[0xFC0 + 0x10]));
 }
 
+static void wide_frame(void) {
+    static int patched;
+    if (R32(&n64_sp_mem[0xFC0]) != 1 || (!wide_k && !patched)) return;
+    patched = wide_k != 0;
+    for (size_t i = 0; i < sizeof wide_code / sizeof wide_code[0]; i++) {
+        const u32 pa = wide_code[i].pa, from = wide_k ? wide_code[i].normal : wide_code[i].wide;
+        if (R32(&n64_rdram[pa]) != from) continue;
+        W32(&n64_rdram[pa], wide_k ? wide_code[i].wide : wide_code[i].normal);
+        r4300_code_written(pa, 4);
+    }
+    static long c[256];
+    wide_3d = 0;
+    if (wide_k) dl_walk(R32(&n64_sp_mem[0xFC0 + 0x30]), 0, c);
+    rdp_wide_frame(wide_3d);
+}
+
 static void sp_status_write(u32 v) {
     if ((v & 1) && n64_dl_log) sp_task_debug();
+    if (v & 1) wide_frame();
     if (v & 1) { sp_status &= ~(u32)SP_HALT; st_sp_start++; }
     if (v & 2) sp_status |= SP_HALT;
     if (v & 4) sp_status &= ~(u32)SP_BROKE;
