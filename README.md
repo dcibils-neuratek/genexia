@@ -10,7 +10,7 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
 | Street Fighter II' Special Champion Edition | Recompiled and built in; widescreen, killer combos, mana |
 | Ultimate Mortal Kombat 3 (USA) | Recompiled; widescreen; ROM loaded with `--rom` |
 | Any other Genesis ROM | Runs on the interpreter |
-| Super Mario Kart (USA), SNES | Recompiled, pixel-identical to the interpreter in attract mode; ROM loaded with `--rom` |
+| Super Mario Kart (USA), SNES | Recompiled, widescreen races (Mode 7 draws real extra track); ROM loaded with `--rom` |
 | Other SNES ROMs | Run on the interpreter; only DSP-1 cartridges have their extra chip implemented |
 
 ## Architecture
@@ -206,6 +206,10 @@ B / Circle = A, X / Square = Y, Y / Triangle = X, RB = R, RT = L, Start = Start,
 Back = Select. On the keyboard: Z = B, X = A, A = Y, S = X, D = R, C = L,
 Return = Start, Right Shift = Select. In Super Mario Kart, B accelerates and X
 toggles the map view.
+
+Super Mario Kart's 1-player mode is split-screen too: you on top, the course map
+or rear view below. Pick 1P GAME with the cursor on the title menu, then confirm
+with Start or B.
 
 ### Options menu
 

@@ -53,8 +53,14 @@ EMU_STATE static PpuRegs P;
 
 /* ------------------------------------------- scratch buffers, lookup tables */
 static u32 layer[512];                 /* current layer, packed pixels */
-static u32 above[256], below[256];     /* main and sub screen */
-static u8  win_mask[6][256];
+static u32 above[512], below[512];     /* main and sub screen */
+static u8  win_mask[6][512];
+/* Widescreen: frames with Mode 7 render XO extra pixels on each side (game x
+ * -XO..255+XO, buffer index x+XO, LW pixels). Other frames stay 256 wide,
+ * centred with black bars (PAD). XO is 0 whenever widescreen is off. */
+#define WIDE_MARGIN 43
+static int XO, LW = 256, PAD;
+EMU_STATE static u8 saw_mode7, saw_mode7_prev, wide_frame;
 static u8  win_active[6];
 static u64 expand_l[256], expand_r[256]; /* bit -> byte; _l: bit 7 is pixel 0 */
 static u8  luma[16][32];
@@ -157,6 +163,8 @@ void snes_ppu_vblank(void)
 
 void snes_ppu_frame_start(void)
 {
+    saw_mode7_prev = saw_mode7; saw_mode7 = 0;
+    wide_frame = vdp_widescreen && saw_mode7_prev;
     P.in_vblank = 0;
     P.field ^= 1;
     P.frame_hires = 0;
@@ -336,7 +344,19 @@ static void window_range(u8 *o, int n, u8 invert)
 
 /* Computes win_mask[li] (1 = inside the combined window). Returns 0 when the
  * layer has no window enabled; the mask is then all zero. */
+static int window_build_native(int li);
 static int window_build(int li)
+{
+    int r = window_build_native(li);
+    if (XO) {                  /* margins continue the window state at each edge */
+        u8 *o = win_mask[li];
+        memmove(o + XO, o, 256);
+        memset(o, o[XO], (size_t)XO);
+        memset(o + XO + 256, o[XO + 255], (size_t)XO);
+    }
+    return r;
+}
+static int window_build_native(int li)
 {
     u8 *o = win_mask[li];
     int nibble = P.win_sel[li >> 1] >> ((li & 1) * 4) & 15;
@@ -376,14 +396,15 @@ static void merge_layer(int li, int width, int mos)
     if (mos > 1) {
         if (width == 512) mos *= 2;
         u32 held = 0;
-        for (int x = 0; x < width; x++) {
+        int mw = width == 256 ? LW : width;
+        for (int x = 0; x < mw; x++) {
             if (x % mos == 0) held = layer[x];
             else layer[x] = held;
         }
     }
 
     if (width == 256) {
-        for (int x = 0; x < 256; x++) {
+        for (int x = 0; x < LW; x++) {
             u32 p = layer[x];
             if (!p) continue;
             if (main_on && p >> 24 > above[x] >> 24 && !(main_win && wm[x])) above[x] = p;
@@ -437,7 +458,7 @@ static void render_bg(int n, int line, int bpp, u32 pal_base, u32 z0, u32 z1, in
 {
     if (!((P.tm | P.ts) >> n & 1)) return;
     int width = hires ? 512 : 256;
-    clear_layer(width);
+    clear_layer(hires ? width : LW);
     win_active[n] = ((P.tmw | P.tsw) >> n & 1) ? window_build(n) : 0;
 
     int mos = mosaic_size(n);
@@ -459,7 +480,7 @@ static void render_bg(int n, int line, int bpp, u32 pal_base, u32 z0, u32 z1, in
     u32 valid_bit = 0x2000u << n;
     u32 src = (u32)n << 16;
 
-    for (int x = -(int)(hs & 7); x < width; x += 8) {
+    for (int x = -(int)(hs & 7) - ((XO + 7) & ~7); x < width + XO; x += 8) {
         u32 ho = (u32)(x + (int)hs), vo = (u32)y + vs;
         if (opt) {
             int ox = x + (int)(hs & 7);
@@ -509,14 +530,14 @@ static void render_bg(int n, int line, int bpp, u32 pal_base, u32 z0, u32 z1, in
         u32 top = ((e & 0x2000) ? z1 : z0) << 24 | src;
         u32 palno = e >> 10 & 7;
         u32 pal = pal_base + (palno << pal_shift);
-        int i0 = x < 0 ? -x : 0;
-        int i1 = width - x < 8 ? width - x : 8;
+        int i0 = x + XO < 0 ? -(x + XO) : 0;
+        int i1 = width + XO - x < 8 ? width + XO - x : 8;
         for (int i = i0; i < i1; i++) {
             u32 px = (u32)(row >> (i * 8)) & 0xFF;
             if (!px) continue;
-            if (direct)        layer[x + i] = top | direct_color(palno, px);
-            else if (bpp == 8) layer[x + i] = top | cgram[px];
-            else               layer[x + i] = top | cgram[(pal + px) & 0xFF];
+            if (direct)        layer[x + XO + i] = top | direct_color(palno, px);
+            else if (bpp == 8) layer[x + XO + i] = top | cgram[px];
+            else               layer[x + XO + i] = top | cgram[(pal + px) & 0xFF];
         }
     }
     merge_layer(n, width, mos);
@@ -529,7 +550,7 @@ static inline s32 m7_clip(s32 n) { return (n & 0x2000) ? (n | ~1023) : (n & 1023
 static void render_mode7(int n, int line, u32 z0, u32 z1)
 {
     if (!((P.tm | P.ts) >> n & 1)) return;
-    clear_layer(256);
+    clear_layer(LW);
     win_active[n] = ((P.tmw | P.tsw) >> n & 1) ? window_build(n) : 0;
 
     int mos = mosaic_size(n);
@@ -544,7 +565,7 @@ static void render_mode7(int n, int line, u32 z0, u32 z1)
     int direct = n == 0 && (P.cgwsel & 1);
     u32 src = (u32)n << 16;
 
-    for (int sx = 0; sx < 256; sx++) {
+    for (int sx = -XO; sx < 256 + XO; sx++) {
         int x = hflip ? 255 - sx : sx;
         s32 px = (ox + a * x) >> 8, py = (oy + c * x) >> 8;
         int outside = ((px | py) & ~1023) != 0;
@@ -561,7 +582,7 @@ static void render_mode7(int n, int line, u32 z0, u32 z1)
             pix &= 0x7F;
         }
         if (!pix) continue;
-        layer[sx] = z << 24 | src | (direct ? direct_color(0, pix) : cgram[pix]);
+        layer[sx + XO] = z << 24 | src | (direct ? direct_color(0, pix) : cgram[pix]);
     }
     merge_layer(n, 256, mos);
 }
@@ -581,8 +602,8 @@ static int render_obj_line(int line, int draw, const u32 *z)
     const u8 *size = obj_sizes[P.obsel >> 5];
     int interlace = P.setini >> 1 & 1;
     u32 cy = (u32)(line - 1);
-    u8 list[32];
-    int count = 0;
+    u8 list[128];
+    int count = 0, max_list = vdp_no_sprite_limit ? 128 : 32, max_tiles = vdp_no_sprite_limit ? 1 << 20 : 34;
 
     for (int i = 0; i < 128; i++) {
         int n = (P.oam_first + i) & 127;
@@ -591,15 +612,15 @@ static int render_obj_line(int line, int draw, const u32 *z)
         int w = size[(hi >> 1) * 2], h = size[(hi >> 1) * 2 + 1];
         if (((cy - o[1]) & 0xFF) >= (u32)(h >> interlace)) continue;
         int x = o[0] | (hi & 1) << 8;
-        if (x > 256 && x + w - 1 < 512) continue;
-        if (count == 32) { P.range_over = 1; break; }
+        if (x > 256 && x + w - 1 < 512 - XO) continue;   /* parked past 256: stay hidden */
+        if (count == max_list) { P.range_over = 1; break; }
         list[count++] = (u8)n;
     }
     if (!count) return 0;
 
     u32 base = (u32)(P.obsel & 7) << 13;
     u32 gap = ((u32)(P.obsel >> 3 & 3) + 1) << 12;
-    if (draw) clear_layer(256);
+    if (draw) clear_layer(LW);
 
     int tiles = 0;
     for (int i = count - 1; i >= 0; i--) {
@@ -627,8 +648,8 @@ static int render_obj_line(int line, int draw, const u32 *z)
 
         for (int tx = 0; tx < tw; tx++) {
             int sx = (x + tx * 8) & 511;
-            if (x != 256 && sx >= 256 && sx + 7 < 512) continue;
-            if (tiles++ >= 34) { P.time_over = 1; break; }
+            if (x != 256 && sx >= 256 && sx + 7 < 512 - XO) continue;
+            if (tiles++ >= max_tiles) { P.time_over = 1; break; }
             if (!draw) continue;
             u32 mx = (u32)(hf ? tw - 1 - tx : tx);
             u32 tile = ((cx + mx) & 15) | (cr & 15) << 4;
@@ -638,9 +659,9 @@ static int render_obj_line(int line, int draw, const u32 *z)
             if (!row) continue;
             int px = sx >= 256 ? sx - 512 : sx;
             for (int b = 0; b < 8; b++, row >>= 8) {
-                int dx = px + b;
+                int dx = px + b + XO;
                 u32 c = (u32)row & 15;
-                if (c && dx >= 0 && dx < 256) layer[dx] = top | cgram[pal + c];
+                if (c && dx >= 0 && dx < LW) layer[dx] = top | cgram[pal + c];
             }
         }
     }
@@ -690,14 +711,14 @@ static void compose_line(u32 *out, int hires)
 
     if (!(clip_mode == 1 || clip_mode == 2 || math_mode == 1 || math_mode == 2) ||
         !window_build(WIN_COL))
-        memset(win_mask[WIN_COL], 0, 256);
+        memset(win_mask[WIN_COL], 0, (size_t)LW);
     const u8 *cw = win_mask[WIN_COL];
 
     if (!hires) {
         if (!clip_mode && !(P.cgadsub & 0x3F)) {
-            for (int x = 0; x < 256; x++) out[x] = to_rgb(t, above[x] & 0x7FFF);
+            for (int x = 0; x < LW; x++) out[x] = to_rgb(t, above[x] & 0x7FFF);
         } else {
-            for (int x = 0; x < 256; x++) {
+            for (int x = 0; x < LW; x++) {
                 int keep = region_on(clip_mode, cw[x]), allow = region_on(math_mode, cw[x]);
                 out[x] = to_rgb(t, math_pixel(above[x], below[x], keep, allow));
             }
@@ -734,9 +755,14 @@ void snes_ppu_render_line(int line)
         P.frame_hires = 1;
         if (!vdp_skip_render) widen_previous_lines(line - 1);
     }
-    vdp_screen_w = P.frame_hires ? 512 : 256;
+    if (mode == 7 && !blank) saw_mode7 = 1;
+    int wide_out = vdp_widescreen && !P.frame_hires;
+    XO = wide_out && wide_frame ? WIDE_MARGIN : 0;
+    LW = 256 + 2 * XO;
+    PAD = wide_out && !wide_frame ? WIDE_MARGIN : 0;
+    vdp_screen_w = P.frame_hires ? 512 : wide_out ? 256 + 2 * WIDE_MARGIN : 256;
     vdp_screen_h = (P.setini & 4) ? 239 : 224;
-    vdp_native_w = vdp_screen_w;
+    vdp_native_w = P.frame_hires ? 512 : 256;
 
     if (vdp_skip_render) {
         static const u32 none[4];
@@ -745,14 +771,19 @@ void snes_ppu_render_line(int line)
     }
 
     u32 *out = vdp_framebuffer + (line - 1) * VDP_FB_STRIDE;
+    if (PAD) {                     /* not a Mode 7 frame: centred, black sides */
+        memset(out, 0, (size_t)PAD * sizeof *out);
+        memset(out + PAD + 256, 0, (size_t)PAD * sizeof *out);
+        out += PAD;
+    }
     if (blank) {
-        memset(out, 0, (P.frame_hires ? 512u : 256u) * sizeof *out);
+        memset(out, 0, (P.frame_hires ? 512u : (size_t)LW) * sizeof *out);
         return;
     }
 
     u32 a0 = 5u << 16 | cgram[0];
     u32 b0 = 5u << 16 | (hires ? cgram[0] : P.fixed_color);
-    for (int x = 0; x < 256; x++) { above[x] = a0; below[x] = b0; }
+    for (int x = 0; x < LW; x++) { above[x] = a0; below[x] = b0; }
     memset(win_active, 0, sizeof win_active);
 
     int bg3p = P.bgmode & 8;
@@ -822,4 +853,13 @@ void snes_ppu_render_line(int line)
         merge_layer(WIN_OBJ, 256, 1);
     }
     compose_line(out, hires);
+    if (XO) {
+        /* a line the game blanks inside its own view stays blank at the sides */
+        u32 c = out[XO];
+        int same = 1;
+        for (int x = XO + 1; x < XO + 256 && same; x++) same = out[x] == c;
+        if (same && !c) {
+            for (int x = 0; x < XO; x++) out[x] = out[XO + 256 + x] = c;
+        }
+    }
 }

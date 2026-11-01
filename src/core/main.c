@@ -709,7 +709,7 @@ static const char *menu_value(int i, char *b, size_t n) {
     static const char *filters[] = { "Sharp", "Smooth", "Scanlines", "CRT" };
     static const char *strengths[] = { "Soft", "Medium", "Strong" };
     switch (i) {
-    case M_WIDE:     return be == &backend_snes ? "-" : vdp_widescreen ? "16:9" : "Off";
+    case M_WIDE:     return vdp_widescreen ? "16:9" : "Off";
     case M_FILTER:   return filters[video_filter];
     case M_STRENGTH: return video_filter >= FILTER_SCANLINES ? strengths[scan_strength] : "-";
     case M_SHAPE:    return vdp_widescreen ? "-" : pic_shape ? "TV 4:3" : "Square pixels";
@@ -721,7 +721,7 @@ static const char *menu_value(int i, char *b, size_t n) {
 }
 static void menu_change(int i, int dir) {
     switch (i) {
-    case M_WIDE:     if (be != &backend_snes) { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; } break;
+    case M_WIDE:     vdp_widescreen = !vdp_widescreen; menu_dirty = 1; break;
     case M_FILTER:   video_filter = (video_filter + dir + FILTER_COUNT) % FILTER_COUNT; break;
     case M_STRENGTH: scan_strength = (scan_strength + dir + 3) % 3; break;
     case M_SHAPE:    pic_shape = !pic_shape; break;
@@ -858,8 +858,9 @@ int main(int argc, char **argv) {
     configure_game(region_set);
     snprintf(key_wide, sizeof key_wide, "wide_%02X%02X", rom[0x18E], rom[0x18F]);
     snprintf(key_limit, sizeof key_limit, "limit_%02X%02X", rom[0x18E], rom[0x18F]);
-    vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, vdp_hud_rules != 0);
-    vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, vdp_hud_rules != 0);
+    int enhanced = vdp_hud_rules != 0 || (be == &backend_snes && snes_register_game);
+    vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
+    vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);
     power_on();
     if (wav) wav_open(wav);
     /* save-state slot: next to the ROM file, or in Application Support when built in */
@@ -1033,7 +1034,7 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_ESCAPE: running = 0; break;
                 case SDL_SCANCODE_P: paused = !paused; break;
                 case SDL_SCANCODE_F1: power_on(); break;
-                case SDL_SCANCODE_F2: if (be != &backend_snes) vdp_widescreen = !vdp_widescreen; break;
+                case SDL_SCANCODE_F2: vdp_widescreen = !vdp_widescreen; break;
                 case SDL_SCANCODE_F3: video_filter = (video_filter + 1) % FILTER_COUNT; break;
                 case SDL_SCANCODE_F10: menu_open = 1; menu_sel = 0; break;
                 case SDL_SCANCODE_F4: vdp_no_sprite_limit = !vdp_no_sprite_limit; break;

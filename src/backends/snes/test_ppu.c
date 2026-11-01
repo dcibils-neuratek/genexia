@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+int vdp_widescreen, vdp_no_sprite_limit;
 u32 vdp_framebuffer[VDP_FB_STRIDE * 240];
 int vdp_screen_w, vdp_screen_h, vdp_native_w, vdp_skip_render;
 
