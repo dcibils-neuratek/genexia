@@ -494,8 +494,7 @@ static void isp_open(void) {
 }
 
 /* ---------------------------------------------------------- USB devices
- * What the USB Manager really has on the bus, driver or not. The list goes to
- * the log whenever it changes, so plugging a device in shows up. */
+ * What the USB Manager really has on the bus, driver or not: logged at start. */
 static OSStatus (*usb_next)(u32 *, ConnectionID *, u16, u16, u16);
 static OSStatus (*usb_descriptor)(u32 *, void *, u32);
 
@@ -517,10 +516,9 @@ static void usb_open(void) {
 }
 
 static void usb_scan(void) {
-    static u32 last_sum = 1;
     static char lines[16][96];
     if (!usb_next) return;
-    u32 ref = 0xFFFFFFFFu, sum = 0;
+    u32 ref = 0xFFFFFFFFu;
     ConnectionID conn;
     int n = 0;
     while (n < 16 && usb_next(&ref, &conn, 0xFFFF, 0xFFFF, 0xFFFF) == noErr) {
@@ -529,11 +527,8 @@ static void usb_scan(void) {
         const OSStatus e = usb_descriptor(&ref, d, sizeof d);
         snprintf(lines[n], sizeof lines[n], "USB: device %08lX vendor %02X%02X product %02X%02X class %02X/%02X/%02X usb %02X%02X conf %d err %ld",
                  (unsigned long)ref, d[9], d[8], d[11], d[10], d[4], d[5], d[6], d[3], d[2], d[17], (long)e);
-        sum = sum * 31 + (d[9] << 24 | d[8] << 16 | d[11] << 8 | d[10]) + 1;
         n++;
     }
-    if (sum == last_sum) return;
-    last_sum = sum;
     char l[40];
     snprintf(l, sizeof l, "USB: %d devices", n);
     log_line(l);
@@ -984,10 +979,25 @@ int main(void) {
         sound_start();
     }
 
-    unsigned long next = TickCount(), mark = next;
-    int usb_wait = 0, shown = 0, skipped = 0, ran = 0;
-    u32 t_emu = 0, t_vid = 0, t_mark = timebase();
+    /* The timebase runs at a rate only the machine knows: measure it. */
+    unsigned long mark = TickCount();
+    while (TickCount() == mark) { }
+    mark = TickCount();
+    const u32 t_cal = timebase();
+    while (TickCount() < mark + 30) { }
+    const u32 tb_sec = (u32)((u64)(timebase() - t_cal) * 60147 / 30000);
+    const u32 frame_tb = (u32)((u64)tb_sec * 1000 / 59923);   /* the Genesis runs at 59.923 Hz */
+    char cal[60];
+    snprintf(cal, sizeof cal, "Timebase: %lu per second", (unsigned long)tb_sec);
+    log_line(cal);
+
+    int shown = 0, skipped = 0, ran = 0, queue_avg = 2000 * 16;
+    u32 t_emu = 0, t_vid = 0, t_other = 0, t_worst = 0, t_mark = timebase(), deadline = t_mark, t_loop = t_mark;
+    mark = TickCount();
     while (game) {
+        const u32 t_top = timebase();
+        if (t_top - t_loop > t_worst) t_worst = t_top - t_loop;
+        t_loop = t_top;
         pump();
         read_keys();
         keys_poll();
@@ -998,7 +1008,7 @@ int main(void) {
         }
         if (press(0x78)) {
             toggle_full();
-            next = TickCount();
+            deadline = timebase();
         }
         if (press(0x63) && isp_on && isp_configure) {
             dsp_leave();
@@ -1006,17 +1016,18 @@ int main(void) {
             const OSStatus s = isp_configure(NULL);
             isp_log("configure", s);
             black_window();
-            next = TickCount();
+            deadline = timebase();
         }
         if (press(0x65) | press(0x6D)) {
             menu_run();
-            next = TickCount();
+            deadline = timebase();
         }
 
-        /* late by more than a tick: run the game but don't draw */
-        const int behind = TickCount() > next + 1 && skipped < 3;
-        vdp_skip_render = behind;
+        /* more than a frame late: run the game but don't draw */
         const u32 t0 = timebase();
+        t_other += t0 - t_top;
+        const int behind = (s32)(t0 - deadline) > (s32)frame_tb && skipped < 3;
+        vdp_skip_render = behind;
         run_frame();
         const u32 t1 = timebase();
         t_emu += t1 - t0;
@@ -1024,11 +1035,14 @@ int main(void) {
         if (behind) skipped++;
         else { show_frame(vdp_framebuffer); t_vid += timebase() - t1; shown++; skipped = 0; }
 
-        next++;
-        /* the Sound Manager's clock is the master: don't run ahead of it */
-        if (ring_w - ring_r > 2600) next++;
-        while (TickCount() < next) { }
-        if (TickCount() > next + 30) next = TickCount();
+        /* The Sound Manager's clock is the master. It takes samples in big
+         * steps, so follow its average, and lean on the frame time by a hair
+         * instead of ever holding a frame back. */
+        queue_avg += (int)(ring_w - ring_r) - queue_avg / 16;
+        const int excess = queue_avg / 16 - 2000;
+        deadline += frame_tb + (u32)((s32)(frame_tb >> 16) * (excess > 2000 ? 2000 : excess < -2000 ? -2000 : excess) / 8);
+        while ((s32)(timebase() - deadline) < 0) { }
+        if ((s32)(timebase() - deadline) > (s32)(tb_sec / 2)) deadline = timebase();
         if (TickCount() - mark >= 60) {
             char t[80];
             const u32 ticks = TickCount() - mark, all = timebase() - t_mark;
@@ -1037,15 +1051,15 @@ int main(void) {
             t[0] = (char)n;
             if (!full_screen && !dsp_port) SetWTitle(win, (ConstStr255Param)t);
             {
-                char l[120];
-                snprintf(l, sizeof l, "%s  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1, video_path,
+                char l[140];
+                snprintf(l, sizeof l, "%s  Other %d%%  worst %d ms  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1,
+                         (int)(t_other / (all / 100 + 1)), (int)((u64)t_worst * 1000 / tb_sec), video_path,
                          every_other ? " alt-lines" : "", dsp_port ? " full640" : full_screen ? " full" : "", snd_chan ? "on" : "off",
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
             }
-            if (++usb_wait == 5) { usb_wait = 0; usb_scan(); }
             shown = ran = 0;
-            t_emu = t_vid = 0;
+            t_emu = t_vid = t_other = t_worst = 0;
             t_mark = timebase();
             mark = TickCount();
         }
