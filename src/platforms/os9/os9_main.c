@@ -434,11 +434,26 @@ static void open_window(int full) {
     black_window();
 }
 
+/* Consoles here have 15 bits of colour at most, so thousands of colours lose
+ * nothing against millions and the window sends half the data over the video
+ * bus. The desktop gets its depth back on the way out. */
+static int depth_was;
+static void depth_lower(void) {
+    GDHandle gd = GetMainDevice();
+    if ((**(**gd).gdPMap).pixelSize != 32 || !HasDepth(gd, 16, 1, 1)) return;
+    if (SetDepth(gd, 16, 1, 1) == noErr) depth_was = 32;
+}
+static void depth_restore(void) {
+    if (depth_was) SetDepth(GetMainDevice(), (short)depth_was, 1, 1);
+    depth_was = 0;
+}
+
 static void fail(ConstStr255Param msg) {
     SetPort((GrafPtr)win);
     MoveTo(20, 40);
     DrawString(msg);
     while (!Button()) { }
+    depth_restore();
     ExitToShell();
 }
 
@@ -1141,6 +1156,7 @@ int main(void) {
     set_speed(settings_get("speed", 100));
     stats_on = settings_get("stats", 1);
 
+    depth_lower();
     const Game *game = game_select();
     if (game) {
         if (!game_load(game)) fail("\pThat game could not be read.");
@@ -1289,5 +1305,6 @@ int main(void) {
     isp_close();
     if (snd_chan) SndDisposeChannel(snd_chan, true);
     if (full_screen) menu_bar_show(1);
+    depth_restore();
     return 0;
 }

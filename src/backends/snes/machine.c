@@ -221,7 +221,7 @@ static void reg_write(u32 off, u8 v) {
     case 0x420A: vtime = (u16)((vtime & 0xFF) | (v & 1) << 8); return;
     case 0x420B: dma_run(v); return;
     case 0x420C: hdmaen = v; return;
-    case 0x420D: memsel = v; snes_rom_speed = (v & 1) ? 6 : 8; memory_map(); return;
+    case 0x420D: if ((memsel ^ v) & 1) { memsel = v; memory_map(); } memsel = v; snes_rom_speed = (v & 1) ? 6 : 8; return;
     default: break;
     }
     if (off >= 0x4300 && off < 0x4380) {

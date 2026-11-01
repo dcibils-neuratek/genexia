@@ -557,7 +557,6 @@ static inline s32 m7_clip(s32 n) { return (n & 0x2000) ? (n | ~1023) : (n & 1023
 static void render_mode7(int n, int line, u32 z0, u32 z1)
 {
     if (!((P.tm | P.ts) >> n & 1)) return;
-    clear_layer(LW);
     win_active[n] = ((P.tmw | P.tsw) >> n & 1) ? window_build(n) : 0;
 
     int mos = mosaic_size(n);
@@ -575,6 +574,23 @@ static void render_mode7(int n, int line, u32 z0, u32 z1)
     /* the position advances by a constant, no multiply per pixel */
     int x0 = hflip ? 255 + XO : -XO;
     s32 fx = ox + a * x0, fy = oy + c * x0, dx = hflip ? -a : a, dy = hflip ? -c : c;
+    /* First layer of a plain line: every pixel beats the backdrop, so it can go
+     * straight to the screens. Wrapping maps need no outside test. */
+    if (n == 0 && mos == 1 && !direct && rep < 2 &&
+        !(((P.tmw | P.tsw) & 1) && win_active[0])) {
+        const u32 top = z0 << 24 | src;
+        const int main_on = P.tm & 1, sub_on = P.ts & 1;
+        for (int i = 0; i < LW; i++, fx += dx, fy += dy) {
+            u32 t = vram[((u32)fy >> 11 & 127) << 7 | ((u32)fx >> 11 & 127)] & 0xFF;
+            u32 pix = vram[t << 6 | ((u32)fy >> 8 & 7) << 3 | ((u32)fx >> 8 & 7)] >> 8;
+            if (!pix) continue;
+            u32 p = top | cgram[pix];
+            if (main_on) above[i] = p;
+            if (sub_on) below[i] = p;
+        }
+        return;
+    }
+    clear_layer(LW);
     for (int sx = -XO; sx < 256 + XO; sx++, fx += dx, fy += dy) {
         s32 px = fx >> 8, py = fy >> 8;
         int outside = ((px | py) & ~1023) != 0;
@@ -726,6 +742,12 @@ static void compose_line(u32 *out, int hires)
     if (!hires) {
         if (!clip_mode && !(P.cgadsub & 0x3F)) {
             for (int x = 0; x < LW; x++) out[x] = to_rgb(t, above[x] & 0x7FFF);
+        } else if (!clip_mode && !math_mode) {   /* no colour window: only the layer decides */
+            const u32 layers = P.cgadsub & 0x3F;
+            for (int x = 0; x < LW; x++) {
+                const u32 a = above[x];
+                out[x] = to_rgb(t, layers >> (a >> 16 & 7) & 1 ? math_pixel(a, below[x], 1, 1) : a & 0x7FFF);
+            }
         } else {
             for (int x = 0; x < LW; x++) {
                 int keep = region_on(clip_mode, cw[x]), allow = region_on(math_mode, cw[x]);
