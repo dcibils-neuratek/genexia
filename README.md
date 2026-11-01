@@ -295,6 +295,15 @@ A = A, B or X = B, RT = Z, RB = R, Back = L, right stick = C buttons, Y = C-Up,
 Start = Start. On the keyboard: arrows = stick, Z = A, X or A = B, C = Z, D = R,
 S = C-Up, Return = Start, Right Shift = L.
 
+### Choosing a game
+
+Run Genexia with no game named, or open `Genexia.app`, and a game selector appears.
+It lists the built-in game plus every ROM in a `roms/` folder (and its subfolders)
+in the current folder, next to the app, or in `~/Library/Application Support/Genexia/Genexia/roms`.
+Each row shows the console and whether that ROM is recompiled or interpreted. Use
+Up/Down and Enter, a gamepad (D-pad or stick, then A or Start), or the mouse. Esc
+quits. `--rom` skips the selector.
+
 ### Options menu
 
 Press **F10** in the game, or **R3** (right stick click) or **Start + Back**

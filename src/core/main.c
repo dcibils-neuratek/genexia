@@ -11,6 +11,9 @@
 #include <string.h>
 #include <math.h>
 #include <signal.h>
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <sys/resource.h>
 #include <time.h>
 #include <SDL.h>
@@ -447,6 +450,7 @@ static u16 controller_pad(SDL_GameController *gc) {
 
 /* -------------------------------------------------------------- boot */
 size_t sf2_embedded_rom(const unsigned char **p);
+static int probing;      /* the game selector is looking at ROMs: stay quiet */
 
 /* path == NULL: use the ROM built into the executable */
 static int load_rom(const char *path) {
@@ -467,7 +471,7 @@ static int load_rom(const char *path) {
     u32 sum = 0;
     for (u32 i = 0x200; i + 1 < rom_size; i += 2) sum += (u32)(rom[i] << 8 | rom[i + 1]);
     u16 want = (u16)(rom[0x18E] << 8 | rom[0x18F]);
-    fprintf(stderr, "ROM%s: %.48s  %u bytes, checksum %04X (%s)\n", path ? "" : " (built in)", (char *)rom + 0x150,
+    if (!probing) fprintf(stderr, "ROM%s: %.48s  %u bytes, checksum %04X (%s)\n", path ? "" : " (built in)", (char *)rom + 0x150,
             rom_size, sum & 0xFFFF, (sum & 0xFFFF) == want ? "ok" : "MISMATCH");
     return 1;
 }
@@ -484,6 +488,8 @@ static Backend backend_n64 = { "Nintendo 64", 32000, 1.0, reset_n64, run_frame_n
 
 static void configure_game(int region_set) {
     be = &backend_genesis;
+    state_use_section("__emustate");
+    state_on_load = NULL;
     if (n64_detect()) {
         be = &backend_n64;
         game_is_sf2 = 0; vdp_hud_rules = 0;
@@ -495,7 +501,7 @@ static void configure_game(int region_set) {
                             ? recomp_register_sm64 : NULL;
         n64_force_interp = m68k_force_interp || !n64_register_game;
         state_on_load = r4300_recomp_flush;
-        fprintf(stderr, "Game: %s  (Nintendo 64, %s)\n", game_title, n64_force_interp ? "interpreter" : "recompiled");
+        if (!probing) fprintf(stderr, "Game: %s  (Nintendo 64, %s)\n", game_title, n64_force_interp ? "interpreter" : "recompiled");
         return;
     }
     if (memcmp(rom + 0x100, "SEGA", 4) && snes_detect()) {
@@ -507,7 +513,7 @@ static void configure_game(int region_set) {
         snes_register_game = !strcmp(game_title, "SUPER MARIO KART") && rom[0xFFDE] == 0x44 && rom[0xFFDF] == 0xEB
                              ? recomp_register_smk : NULL;
         snes_force_interp = m68k_force_interp || !snes_register_game;
-        fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
+        if (!probing) fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
         return;
     }
     u16 hdr = (u16)(rom[0x18E] << 8 | rom[0x18F]);
@@ -541,7 +547,7 @@ static void configure_game(int region_set) {
         }
         region_version = us ? 0xA0 : jp ? 0x20 : eu ? 0xE0 : 0xA0;
     }
-    fprintf(stderr, "Game: %s  (%s, region %02X)\n", game_title,
+    if (!probing) fprintf(stderr, "Game: %s  (%s, region %02X)\n", game_title,
             m68k_register_game && !m68k_force_interp ? "recompiled" : "interpreter", region_version);
 }
 
@@ -815,6 +821,196 @@ static double display_refresh(SDL_Window *win) {
 }
 
 static volatile sig_atomic_t quit_req;
+
+/* ------------------------------------------------------- game selector
+ * Shown when no game is named on the command line: the built-in game plus
+ * every ROM in a roms/ folder. Each file goes through configure_game() so the
+ * list says what will really happen when it starts. */
+typedef struct { char path[1024], name[96]; const char *console; int recompiled; } GameEntry;
+#define MAX_GAMES 256
+static GameEntry games[MAX_GAMES];
+static int ngames;
+static SDL_Window *sel_win;      /* main() carries on in the selector's window */
+static SDL_Renderer *sel_ren;
+
+static void game_probe(const char *path, const char *fname) {
+    if (ngames == MAX_GAMES) return;
+    GameEntry *g = &games[ngames];
+    if (!load_rom(path)) return;
+    int force = m68k_force_interp;
+    configure_game(1);
+    g->console = be->name;
+    g->recompiled = be == &backend_n64 ? !n64_force_interp
+                  : be == &backend_snes ? !snes_force_interp : m68k_register_game && !m68k_force_interp;
+    m68k_force_interp = force;
+    snprintf(g->path, sizeof g->path, "%s", path ? path : "");
+    snprintf(g->name, sizeof g->name, "%s", path ? fname : game_title);
+    char *dot = strrchr(g->name, '.');
+    if (dot && path) *dot = 0;
+    ngames++;
+}
+
+static int game_known(const char *fname) {
+    for (int i = 0; i < ngames; i++) {
+        const char *f = strrchr(games[i].path, '/');
+        if (f && !strcmp(f + 1, fname)) return 1;
+    }
+    return 0;
+}
+
+static void game_scan(const char *dir, int depth) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    static const char *exts[] = { ".bin", ".md", ".gen", ".smd", ".sfc", ".smc", ".z64", ".n64", ".v64" };
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[1024];
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth) game_scan(p, depth - 1); continue; }
+        const char *x = strrchr(e->d_name, '.');
+        for (unsigned i = 0; x && i < sizeof exts / sizeof *exts; i++)
+            if (!strcasecmp(x, exts[i]) && !game_known(e->d_name)) { game_probe(p, e->d_name); break; }
+    }
+    closedir(d);
+}
+
+static int game_order(const void *a, const void *b) {
+    const GameEntry *x = a, *y = b;
+    if (!x->path[0] != !y->path[0]) return x->path[0] ? 1 : -1;   /* built-in game first */
+    int c = strcmp(x->console, y->console);
+    return c ? c : strcasecmp(x->name, y->name);
+}
+
+static void game_list(const char *argv0) {
+    const unsigned char *data;
+    probing = 1;
+    if (sf2_embedded_rom(&data) >= 0x200) game_probe(NULL, NULL);
+    else {
+        const char *near = find_rom(argv0);
+        if (near) game_probe(near, strrchr(near, '/') ? strrchr(near, '/') + 1 : near);
+    }
+    char *base = SDL_GetBasePath(), *pref = SDL_GetPrefPath("Genexia", "Genexia"), p[1024];
+    game_scan("roms", 1);
+    if (base) {
+        snprintf(p, sizeof p, "%sroms", base); game_scan(p, 1);
+        snprintf(p, sizeof p, "%s../../../roms", base); game_scan(p, 1);   /* app next to roms/ */
+    }
+    if (pref) { snprintf(p, sizeof p, "%sroms", pref); game_scan(p, 1); }
+    SDL_free(base); SDL_free(pref);
+    probing = 0;
+    qsort(games, (size_t)ngames, sizeof *games, game_order);
+}
+
+enum { SEL_W = 398, SEL_H = 224, SEL_RH = 18, SEL_TOP = 46, SEL_ROWS = 8 };
+
+static void select_draw(u32 *fb, int sel, int top) {
+    fx_box(fb, VDP_FB_STRIDE, SEL_W, SEL_H, 0, 0, SEL_W, SEL_H, 0x0A0A1E, 1.0f);
+    fx_box(fb, VDP_FB_STRIDE, SEL_W, SEL_H, 0, 34, SEL_W, 35, 0x5060FF, 1.0f);
+    const char *t = "GENEXIA";
+    fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, t, (SEL_W - fx_text_width(t, 3)) / 2, 8, 3, 0xFFFFFF, 0x80A0FF);
+    if (!ngames) {
+        t = "No games found. Put ROMs in a roms folder.";
+        fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, t, (SEL_W - fx_text_width(t, 1)) / 2, 100, 1, 0xD0D8F0, 0xA0B0D0);
+    }
+    for (int i = top; i < ngames && i < top + SEL_ROWS; i++) {
+        int y = SEL_TOP + (i - top) * SEL_RH, on = i == sel;
+        if (on) fx_box(fb, VDP_FB_STRIDE, SEL_W, SEL_H, 10, y - 4, SEL_W - 10, y + 12, 0x3040A0, 0.9f);
+        const GameEntry *g = &games[i];
+        const char *tag = g->recompiled ? "RECOMPILED" : "INTERPRETED";
+        u32 tc = g->recompiled ? 0x60E090 : 0x8090B0;
+        int tagw = fx_text_width(tag, 1), conw = 84;
+        char name[96];
+        snprintf(name, sizeof name, "%s", g->name);
+        int room = SEL_W - 28 - tagw - conw - 12;
+        for (size_t n = strlen(name); n && fx_text_width(name, 1) > room; n--) name[n - 1] = 0;
+        u32 c = on ? 0xFFFFFF : 0xB0B8D0;
+        fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, name, 18, y, 1, c, c);
+        fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, g->console, SEL_W - 18 - tagw - conw, y, 1, on ? 0xFFE060 : 0xA0B0D0, on ? 0xFFA020 : 0xA0B0D0);
+        fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, tag, SEL_W - 18 - tagw, y, 1, tc, tc);
+    }
+    t = "UP DOWN CHOOSE   ENTER OR A PLAY   ESC QUIT";
+    fx_text(fb, VDP_FB_STRIDE, SEL_W, SEL_H, t, (SEL_W - fx_text_width(t, 1)) / 2, SEL_H - 14, 1, 0x8090B0, 0x8090B0);
+}
+
+/* Returns the chosen entry, or NULL to quit. */
+static const GameEntry *game_select(const char *argv0, int scale) {
+    game_list(argv0);
+    sel_win = SDL_CreateWindow("Genexia", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SEL_W * scale, SEL_H * scale,
+                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    sel_ren = SDL_CreateRenderer(sel_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Texture *tex = SDL_CreateTexture(sel_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, SEL_W, SEL_H);
+    SDL_RenderSetLogicalSize(sel_ren, SEL_W, SEL_H);
+    SDL_GameController *pads[8];
+    int npads = 0;
+    for (int i = 0; i < SDL_NumJoysticks() && npads < 8; i++)
+        if (SDL_IsGameController(i)) pads[npads++] = SDL_GameControllerOpen(i);
+
+    static u32 fb[VDP_FB_STRIDE * 240];
+    int sel = 0, top = 0, stick = 0, frame = 0;
+    const GameEntry *pick = NULL;
+    int done = 0, shot_at = getenv("SF2_SELECT_SHOT") ? 5 : -1;
+    if (getenv("SF2_SELECT_ROW")) sel = atoi(getenv("SF2_SELECT_ROW")) % (ngames ? ngames : 1);
+    while (!done) {
+        SDL_Event e;
+        int move = 0, go = 0, back = 0;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) back = 1;
+            else if (e.type == SDL_KEYDOWN) {
+                SDL_Scancode c = e.key.keysym.scancode;
+                move += c == SDL_SCANCODE_DOWN ? 1 : c == SDL_SCANCODE_UP ? -1 : 0;
+                go |= c == SDL_SCANCODE_RETURN || c == SDL_SCANCODE_SPACE;
+                back |= c == SDL_SCANCODE_ESCAPE;
+            } else if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+                int b = e.cbutton.button;
+                move += b == SDL_CONTROLLER_BUTTON_DPAD_DOWN ? 1 : b == SDL_CONTROLLER_BUTTON_DPAD_UP ? -1 : 0;
+                go |= b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_START;
+            } else if (e.type == SDL_CONTROLLERAXISMOTION && e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+                int d = e.caxis.value > 16000 ? 1 : e.caxis.value < -16000 ? -1 : 0;
+                if (d != stick) move += d;
+                stick = d;
+            } else if (e.type == SDL_CONTROLLERDEVICEADDED && npads < 8) {
+                pads[npads++] = SDL_GameControllerOpen(e.cdevice.which);
+            } else if (e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN) {
+                int y = e.type == SDL_MOUSEMOTION ? e.motion.y : e.button.y;
+                int row = (y - SEL_TOP + 4) / SEL_RH;
+                if (y >= SEL_TOP - 4 && row < SEL_ROWS && top + row < ngames) {
+                    sel = top + row;
+                    go |= e.type == SDL_MOUSEBUTTONDOWN;
+                }
+            }
+        }
+        if (ngames) sel = (sel + move + ngames * (move < 0 ? -move : 1)) % ngames;
+        if (sel < top) top = sel;
+        if (sel >= top + SEL_ROWS) top = sel - SEL_ROWS + 1;
+        if (go && ngames) { pick = &games[sel]; done = 1; }
+        if (back || quit_req) done = 1;
+        select_draw(fb, sel, top);
+        SDL_UpdateTexture(tex, NULL, fb, VDP_FB_STRIDE * 4);
+        SDL_RenderClear(sel_ren);
+        SDL_RenderCopy(sel_ren, tex, NULL, NULL);
+        SDL_RenderPresent(sel_ren);
+        if (frame++ == shot_at) {                 /* dev: capture, then start the row */
+            FILE *f = fopen(getenv("SF2_SELECT_SHOT"), "wb");
+            fprintf(f, "P6\n%d %d\n255\n", SEL_W, SEL_H);
+            for (int y = 0; y < SEL_H; y++) for (int x = 0; x < SEL_W; x++) {
+                u32 v = fb[y * VDP_FB_STRIDE + x];
+                fputc((int)(v >> 16) & 255, f); fputc((int)(v >> 8) & 255, f); fputc((int)v & 255, f);
+            }
+            fclose(f);
+            if (ngames) pick = &games[sel];
+            done = 1;
+        }
+    }
+    for (int i = 0; i < npads; i++) if (pads[i]) SDL_GameControllerClose(pads[i]);
+    SDL_DestroyTexture(tex);
+    SDL_PumpEvents();
+    SDL_FlushEvents(SDL_KEYDOWN, SDL_CONTROLLERAXISMOTION + 8);
+    return pick;
+}
+
 static void on_signal(int s) { (void)s; quit_req = 1; }
 
 int main(int argc, char **argv) {
@@ -875,6 +1071,12 @@ int main(int argc, char **argv) {
     if (SDL_Init(headless ? 0 : (SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER)) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
+    }
+    /* no game named: let the player choose */
+    if (gui && !rom_path) {
+        const GameEntry *g = game_select(argv[0], scale);
+        if (!g) { SDL_Quit(); return 0; }
+        if (g->path[0]) rom_path = g->path;
     }
     /* a ROM given on the command line wins, then the built-in copy, then a file nearby */
     int embedded = 0;
@@ -1021,11 +1223,12 @@ int main(int argc, char **argv) {
 
     signal(SIGTERM, on_signal);
     signal(SIGALRM, on_signal);
-    SDL_Window *win = SDL_CreateWindow("Genexia",
+    SDL_Window *win = sel_win ? sel_win : SDL_CreateWindow("Genexia",
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        (vdp_widescreen ? 398 : 320) * scale, 224 * scale,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (sel_win) SDL_SetWindowSize(win, (vdp_widescreen ? 398 : 320) * scale, 224 * scale);
+    SDL_Renderer *ren = sel_ren ? sel_ren : SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, VDP_FB_STRIDE, 240);
     SDL_RenderSetLogicalSize(ren, 320, 224);
