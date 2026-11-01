@@ -1,0 +1,23 @@
+# Game data and anything derived from it must never be committed:
+# ROMs, recompiled game code, disassemblies, captures, save states.
+*.bin
+*.md.state
+*.state
+*.sfc
+*.smc
+*.gen
+roms/
+generated/
+docs/*.lst
+docs/*.png
+docs/*.wav
+
+# build outputs
+build/
+genexia
+sf2
+Genexia.app/
+SF2.app/
+*.o
+*.ppm
+.DS_Store
