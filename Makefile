@@ -39,7 +39,7 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: FORCE os9 all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
+.PHONY: FORCE os9 os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
 
 all: genexia
 
@@ -132,6 +132,13 @@ os9: $(BUILD)/version.h
 	  hcopy -m $(BUILD)/os9/Genexia.bin :Genexia && \
 	  { [ ! -f "$(ROM)" ] || hcopy -r "$(ROM)" :sf2.bin; } && humount
 	@ls -l $(BUILD)/os9/Genexia.dsk
+
+# Send the Mac OS 9 build to a machine with File Sharing on, read its log
+IMAC ?= 192.168.1.38
+os9-push: os9
+	python3 tools/os9_share.py $(IMAC) push $(BUILD)/os9/Genexia.bin "Genexia $(BUILD_NO)"
+os9-log:
+	@python3 tools/os9_share.py $(IMAC) get genexia.log
 
 tests:
 	@mkdir -p $(BUILD)

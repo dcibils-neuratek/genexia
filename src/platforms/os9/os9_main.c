@@ -8,7 +8,9 @@
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
  * F1 = draw every other line (faster, looks like scanlines).
  * The title bar shows game and drawn frames per second, and the share of time
- * in the emulation and in drawing: how to judge a machine.
+ * in the emulation and in drawing: how to judge a machine. The same numbers go
+ * to genexia.log next to the application every second. The file is opened and
+ * closed each time, so File Sharing can read it while the game runs.
  */
 #include <Multiverse.h>
 #include <stdio.h>
@@ -162,7 +164,7 @@ static WindowPtr win;
 static GWorldPtr gw;
 static Rect pic;
 
-static int in_front = 1, every_other;
+static int in_front = 1, every_other, video_path;   /* video_path: last screen depth drawn to, 0 = system copy */
 
 static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
 
@@ -201,11 +203,13 @@ static int show_direct(void) {
         }
     }
     ShowCursor();
+    video_path = depth;
     return 1;
 }
 
 static void show_frame(void) {
     if (show_direct()) return;
+    video_path = 0;
     PixMapHandle pm = GetGWorldPixMap(gw);
     LockPixels(pm);
     u8 *base = (u8 *)GetPixBaseAddr(pm);
@@ -227,6 +231,14 @@ static void fail(ConstStr255Param msg) {
     DrawString(msg);
     while (!Button()) { }
     ExitToShell();
+}
+
+static void log_line(const char *t) {
+    FILE *f = fopen("genexia.log", "a");
+    if (!f) return;
+    fputs(t, f);
+    fputc('\r', f);
+    fclose(f);
 }
 
 /* --------------------------------------------------------------- main */
@@ -258,6 +270,7 @@ int main(void) {
     psg_reset();
     m68k_reset();
     sound_start();
+    log_line("--- Genexia build " GENEXIA_BUILD);
 
     unsigned long next = TickCount(), mark = next;
     int shown = 0, skipped = 0, ran = 0, f1_held = 0;
@@ -302,13 +315,19 @@ int main(void) {
         next++;
         while (TickCount() < next) { }
         if (TickCount() > next + 30) next = TickCount();
-        if (TickCount() - mark >= 120) {
+        if (TickCount() - mark >= 60) {
             char t[80];
             const u32 ticks = TickCount() - mark, all = timebase() - t_mark;
             const int n = snprintf(t + 1, sizeof t - 1, "Game %d  Drawn %d  CPU %d%%  Draw %d%%", (int)(ran * 60 / ticks), (int)(shown * 60 / ticks),
                                    (int)(t_emu / (all / 100 + 1)), (int)(t_vid / (all / 100 + 1)));
             t[0] = (char)n;
             SetWTitle(win, (ConstStr255Param)t);
+            {
+                char l[120];
+                snprintf(l, sizeof l, "%s  video %d%s  sound %s  queued %d  ticks %lu", t + 1, video_path,
+                         every_other ? " alt-lines" : "", snd_chan ? "on" : "off", (int)(ring_w - ring_r), TickCount());
+                log_line(l);
+            }
             shown = ran = 0;
             t_emu = t_vid = 0;
             t_mark = timebase();
