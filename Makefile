@@ -12,7 +12,7 @@ SDL_CF   := $(shell sdl2-config --cflags)
 SDL_LD   := $(shell sdl2-config --libs)
 # core/ = shared front end, chips/ = reusable chips with no console knowledge,
 # backends/<console>/ = what is unique to one console
-INCS     := -Isrc -Isrc/core -Isrc/chips -Isrc/backends/genesis -Isrc/backends/snes -Isrc/backends/n64
+INCS     := -Ibuild -Isrc -Isrc/core -Isrc/chips -Isrc/backends/genesis -Isrc/backends/snes -Isrc/backends/n64
 CFLAGS   := -O2 -std=c11 -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter $(INCS) $(SDL_CF)
 GENFLAGS := -O1 -std=c11 -w $(INCS)
 BUILD    := build
@@ -39,7 +39,18 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
+# Build number: commits so far and the commit, + when the code had uncommitted
+# changes. Shown in the window title, the options menu and by --version.
+BUILD_NO := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
+BUILD_ID := $(BUILD_NO) $(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD -- src tools Makefile 2>/dev/null || echo +)
+$(BUILD)/version.h: FORCE
+	@mkdir -p $(BUILD)
+	@echo '#define GENEXIA_BUILD "$(BUILD_ID)"' > $@.new
+	@cmp -s $@.new $@ || cp $@.new $@
+	@rm -f $@.new
+$(BUILD)/core/main.o: $(BUILD)/version.h
+
+.PHONY: FORCE all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
 
 all: genexia
 
@@ -103,6 +114,7 @@ app: genexia
 	  install_name_tool -id @loader_path/libSDL3.dylib Genexia.app/Contents/Frameworks/libSDL3.dylib; fi
 	install_name_tool -change "$$(otool -L genexia | awk '/libSDL2/{print $$1}')" @executable_path/../Frameworks/libSDL2-2.0.0.dylib Genexia.app/Contents/MacOS/genexia
 	cp tools/Info.plist Genexia.app/Contents/Info.plist
+	plutil -replace CFBundleVersion -string "$(BUILD_NO)" Genexia.app/Contents/Info.plist
 	codesign --force -s - --deep Genexia.app
 	@if [ "$(EMBED)" = 1 ]; then echo "Genexia.app is self-contained (ROM built in)"; \
 	 else echo "No ROM embedded: put it next to the app or in Genexia.app/Contents/MacOS/ as sf2.bin"; fi

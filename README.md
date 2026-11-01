@@ -340,6 +340,10 @@ quits. `--rom` skips the selector.
 
 ### Options menu
 
+Every build has a number: the commit count and commit, with `+` when it was
+built from uncommitted code. It is in the window title, at the top right of the
+options menu, and printed by `genexia --version`.
+
 Press **F10** in the game, or **R3** (right stick click) or **Start + Back**
 together on a gamepad. The game pauses while the menu is open, and your choices
 are remembered.

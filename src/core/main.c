@@ -25,6 +25,7 @@
 #include "snes.h"
 #include "machine.h"
 #include "n64_machine.h"
+#include "version.h"
 #include "enhance.h"
 
 extern u64 m68k_blocks_run, m68k_interp_run;
@@ -834,7 +835,9 @@ static void menu_draw(u32 *fb, int stride, int w, int h) {
     fx_box(fb, stride, w, h, x0, y0, x0 + PW, y0 + PH, 0x10102C, 0.92f);
     fx_box(fb, stride, w, h, x0, y0, x0 + PW, y0 + 1, 0x5060FF, 1.0f);
     fx_box(fb, stride, w, h, x0, y0 + PH - 1, x0 + PW, y0 + PH, 0x5060FF, 1.0f);
-    const char *t = menu_page ? "ENHANCEMENTS" : "GENEXIA OPTIONS";
+    const char *t = "BUILD " GENEXIA_BUILD;
+    fx_text(fb, stride, w, h, t, w - fx_text_width(t, 1) - 4, 4, 1, 0xA0B0D0, 0xA0B0D0);
+    t = menu_page ? "ENHANCEMENTS" : "GENEXIA OPTIONS";
     fx_text(fb, stride, w, h, t, (w - fx_text_width(t, 2)) / 2, y0 + 8, 2, 0xFFFFFF, 0x80A0FF);
     for (int i = 0; i < count; i++) {
         const int item = menu_pages[menu_page][i];
@@ -1100,6 +1103,8 @@ static const GameEntry *game_select(const char *argv0, int scale) {
 static void on_signal(int s) { (void)s; quit_req = 1; }
 
 int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--version")) { printf("Genexia build %s\n", GENEXIA_BUILD); return 0; }
     const char *rom_path = NULL, *shot = NULL, *wav = NULL;
     int frames = 0, scale = 3, headless = 0, state_test = 0;
     int wide_opt = -1, limit_opt = -1, region_set = 0, runahead_cli = 0;
@@ -1587,7 +1592,7 @@ int main(int argc, char **argv) {
         if (SDL_GetTicks() < osd_until || dragging) draw_osd(ren, win);
         if (speed_pct != last_speed) {
             char title[128];
-            snprintf(title, sizeof title, "Genexia  -  %s  -  F10 options%s", game_title, speed_pct == 100 ? "" : "  -  speed");
+            snprintf(title, sizeof title, "Genexia build %s  -  %s  -  F10 options%s", GENEXIA_BUILD, game_title, speed_pct == 100 ? "" : "  -  speed");
             if (speed_pct != 100) snprintf(title + strlen(title), sizeof title - strlen(title), " %d%%", speed_pct);
             if (runahead != 1)
                 snprintf(title + strlen(title), sizeof title - strlen(title), "  -  run-ahead %d", runahead);
