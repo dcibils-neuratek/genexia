@@ -5,8 +5,10 @@
  * SDL or enhancements: Toolbox window, Sound Manager and the keyboard. The ROM
  * is read from a file called sf2.bin next to the application.
  *
- * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit.
- * The title bar shows frames per second, which is how to judge a machine.
+ * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
+ * F1 = draw every other line (faster, looks like scanlines).
+ * The title bar shows game and drawn frames per second, and the share of time
+ * in the emulation and in drawing: how to judge a machine.
  */
 #include <Multiverse.h>
 #include <stdio.h>
@@ -160,7 +162,50 @@ static WindowPtr win;
 static GWorldPtr gw;
 static Rect pic;
 
+static int in_front = 1, every_other;
+
+static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
+
+/* Straight into video memory, when the whole picture is on the main screen at
+ * 16 or 32 bits and nothing can cover it. Every second line is left out in
+ * every_other mode. Returns 0 if the system has to do it instead. */
+static int show_direct(void) {
+    if (!in_front || FrontWindow() != win) return 0;
+    GDHandle gd = GetMainDevice();
+    PixMapHandle pm = (**gd).gdPMap;
+    const int depth = (**pm).pixelSize;
+    if (depth != 32 && depth != 16) return 0;
+    Point o = { 0, 0 };
+    SetPort((GrafPtr)win);
+    LocalToGlobal(&o);
+    const Rect sr = (**gd).gdRect;
+    if (o.h < sr.left || o.v < sr.top + GetMBarHeight() || o.h + FB_W * 2 > sr.right || o.v + FB_H * 2 > sr.bottom) return 0;
+    Rect r = { o.v, o.h, (short)(o.v + FB_H * 2), (short)(o.h + FB_W * 2) };
+    const Point none = { 0, 0 };
+    ShieldCursor(&r, none);
+    const int row = (**pm).rowBytes & 0x3FFF;
+    u8 *line = (u8 *)(**pm).baseAddr + (size_t)(o.v - (**pm).bounds.top) * row + (size_t)(o.h - (**pm).bounds.left) * (depth / 8);
+    for (int y = 0; y < FB_H; y++, line += row * 2) {
+        const u32 *src = &vdp_framebuffer[y * VDP_FB_STRIDE];
+        for (int rep = 0; rep < (every_other ? 1 : 2); rep++) {
+            if (depth == 32) {
+                volatile u32 *d = (volatile u32 *)(line + (size_t)rep * row);
+                for (int x = 0; x < FB_W; x++) { const u32 c = src[x]; d[0] = c; d[1] = c; d += 2; }
+            } else {
+                volatile u32 *d = (volatile u32 *)(line + (size_t)rep * row);
+                for (int x = 0; x < FB_W; x++) {
+                    const u32 c = src[x], p = (c >> 9 & 0x7C00) | (c >> 6 & 0x3E0) | (c >> 3 & 0x1F);
+                    *d++ = p << 16 | p;
+                }
+            }
+        }
+    }
+    ShowCursor();
+    return 1;
+}
+
 static void show_frame(void) {
+    if (show_direct()) return;
     PixMapHandle pm = GetGWorldPixMap(gw);
     LockPixels(pm);
     u8 *base = (u8 *)GetPixBaseAddr(pm);
@@ -215,36 +260,58 @@ int main(void) {
     sound_start();
 
     unsigned long next = TickCount(), mark = next;
-    int shown = 0, skipped = 0;
+    int shown = 0, skipped = 0, ran = 0, f1_held = 0;
+    u32 t_emu = 0, t_vid = 0, t_mark = timebase();
     for (;;) {
         EventRecord ev;
         if (WaitNextEvent(everyEvent, &ev, 0, NULL)) {
             if (ev.what == mouseDown) {
                 WindowPtr w;
                 if (FindWindow(ev.where, &w) == inDrag) DragWindow(w, ev.where, &qd.screenBits.bounds);
+            } else if (ev.what == osEvt && (ev.message >> 24 & 0xFF) == 1) {
+                in_front = ev.message & 1;   /* suspend or resume */
             } else if (ev.what == updateEvt) {
                 BeginUpdate((WindowPtr)ev.message);
                 EndUpdate((WindowPtr)ev.message);
             }
         }
         if (read_keys()) break;
+        {
+            unsigned long km[4];
+            GetKeys((void *)km);
+            const int f1 = key_down(km, 0x7A);
+            if (f1 && !f1_held) {
+                every_other = !every_other;
+                SetPort((GrafPtr)win);
+                EraseRect(&pic);
+            }
+            f1_held = f1;
+        }
 
         /* late by more than a tick: run the game but don't draw */
         const int behind = TickCount() > next + 1 && skipped < 3;
         vdp_skip_render = behind;
+        const u32 t0 = timebase();
         run_frame();
+        const u32 t1 = timebase();
+        t_emu += t1 - t0;
+        ran++;
         if (behind) skipped++;
-        else { show_frame(); shown++; skipped = 0; }
+        else { show_frame(); t_vid += timebase() - t1; shown++; skipped = 0; }
 
         next++;
         while (TickCount() < next) { }
         if (TickCount() > next + 30) next = TickCount();
         if (TickCount() - mark >= 120) {
-            char t[64];
-            const int n = snprintf(t + 1, sizeof t - 1, "Genexia build " GENEXIA_BUILD "  %d fps", (int)(shown * 60 / (TickCount() - mark)));
+            char t[80];
+            const u32 ticks = TickCount() - mark, all = timebase() - t_mark;
+            const int n = snprintf(t + 1, sizeof t - 1, "Game %d  Drawn %d  CPU %d%%  Draw %d%%", (int)(ran * 60 / ticks), (int)(shown * 60 / ticks),
+                                   (int)(t_emu / (all / 100 + 1)), (int)(t_vid / (all / 100 + 1)));
             t[0] = (char)n;
             SetWTitle(win, (ConstStr255Param)t);
-            shown = 0;
+            shown = ran = 0;
+            t_emu = t_vid = 0;
+            t_mark = timebase();
             mark = TickCount();
         }
     }

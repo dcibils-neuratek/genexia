@@ -16,5 +16,5 @@ add_application(Genexia
 
 target_compile_definitions(Genexia PRIVATE GENEXIA_OS9)
 target_include_directories(Genexia PRIVATE ${ROOT}/build ${ROOT}/src ${ROOT}/src/core ${ROOT}/src/chips ${ROOT}/src/backends/genesis)
-target_compile_options(Genexia PRIVATE -std=gnu11 -O2 -w -mminimal-toc)
+target_compile_options(Genexia PRIVATE -std=gnu11 -O2 -w -mminimal-toc -mcpu=750 -mtune=7450 -fno-strict-aliasing)
 target_link_libraries(Genexia -lm)

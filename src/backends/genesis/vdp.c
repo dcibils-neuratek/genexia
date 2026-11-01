@@ -730,9 +730,13 @@ static void render_line(int line)
     for (int x = 0; x < x0; x++) out[x] = 0;
     for (int x = x1; x < width; x++) out[x] = 0;
 
+#ifdef GENEXIA_OS9                 /* no effects to mask there */
+    #define FXMARK(x, s) do { } while (0)
+#else
     u8 *fm = &vdp_fx_mask[line * VDP_FB_STRIDE];
     memset(fm, 0, (size_t)width);
     #define FXMARK(x, s) do { int pl_ = ((s) >> 4) & 3; if (pl_ >= 2) fm[x] = (u8)(pl_ - 1); } while (0)
+#endif
     if (!(regs[12] & 0x08)) {
         for (int x = x0; x < x1; x++) {
             u8 a = A[x], b = B[x], s = S[x], c;
