@@ -430,6 +430,53 @@ static void isp_open(void) {
     isp_on = 1;
 }
 
+/* ---------------------------------------------------------- USB devices
+ * What the USB Manager really has on the bus, driver or not. The list goes to
+ * the log whenever it changes, so plugging a device in shows up. */
+static OSStatus (*usb_next)(u32 *, ConnectionID *, u16, u16, u16);
+static OSStatus (*usb_descriptor)(u32 *, void *, u32);
+
+static void usb_open(void) {
+    static const unsigned char *const names[] = { "\pUSBServicesLib", "\pUSBFamilyExpertLib", "\pUSBManagerLib" };
+    for (int i = 0; i < 3 && !usb_next; i++) {
+        ConnectionID lib;
+        Ptr entry;
+        Str255 why;
+        char l[80];
+        const OSErr e = GetSharedLibrary(names[i], 'pwpc', 1, &lib, &entry, why);
+        snprintf(l, sizeof l, "USB: library %.*s %d", names[i][0], names[i] + 1, e);
+        log_line(l);
+        if (e != noErr) continue;
+        usb_next = isp_find(lib, "\pUSBGetNextDeviceByClass");
+        usb_descriptor = isp_find(lib, "\pUSBGetDeviceDescriptor");
+        if (!usb_descriptor) usb_next = NULL;
+    }
+}
+
+static void usb_scan(void) {
+    static u32 last_sum = 1;
+    static char lines[16][96];
+    if (!usb_next) return;
+    u32 ref = 0xFFFFFFFFu, sum = 0;
+    ConnectionID conn;
+    int n = 0;
+    while (n < 16 && usb_next(&ref, &conn, 0xFFFF, 0xFFFF, 0xFFFF) == noErr) {
+        u8 d[18];
+        memset(d, 0, sizeof d);
+        const OSStatus e = usb_descriptor(&ref, d, sizeof d);
+        snprintf(lines[n], sizeof lines[n], "USB: device %08lX vendor %02X%02X product %02X%02X class %02X/%02X/%02X usb %02X%02X conf %d err %ld",
+                 (unsigned long)ref, d[9], d[8], d[11], d[10], d[4], d[5], d[6], d[3], d[2], d[17], (long)e);
+        sum = sum * 31 + (d[9] << 24 | d[8] << 16 | d[11] << 8 | d[10]) + 1;
+        n++;
+    }
+    if (sum == last_sum) return;
+    last_sum = sum;
+    char l[40];
+    snprintf(l, sizeof l, "USB: %d devices", n);
+    log_line(l);
+    for (int i = 0; i < n; i++) log_line(lines[i]);
+}
+
 /* ------------------------------------------------------- DrawSprocket */
 typedef struct {
     u32 frequency, width, height, reserved1, reserved2, color_needs;
@@ -566,9 +613,11 @@ int main(void) {
     log_line("--- Genexia build " GENEXIA_BUILD);
     isp_open();
     dsp_open();
+    usb_open();
+    usb_scan();
 
     unsigned long next = TickCount(), mark = next;
-    int shown = 0, skipped = 0, ran = 0, f1_held = 0, f2_held = 0, f3_held = 0;
+    int usb_wait = 0, shown = 0, skipped = 0, ran = 0, f1_held = 0, f2_held = 0, f3_held = 0;
     u32 t_emu = 0, t_vid = 0, t_mark = timebase();
     for (;;) {
         EventRecord ev;
@@ -647,6 +696,7 @@ int main(void) {
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
             }
+            if (++usb_wait == 5) { usb_wait = 0; usb_scan(); }
             shown = ran = 0;
             t_emu = t_vid = 0;
             t_mark = timebase();
