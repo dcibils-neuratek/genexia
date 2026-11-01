@@ -111,7 +111,7 @@ at start-up.
 | Start | Return | Start | 1 |
 | Mode | Right Shift | | |
 
-**Gamepad** (Xbox / PlayStation / Switch Pro and other SDL controllers). The first controller to press a button becomes P1, the next becomes P2. A pad in use also takes P1 if the current P1 has been idle for 10 seconds, and assignments are printed in the terminal:
+**Gamepad** (Xbox / PlayStation / Switch Pro and other SDL controllers). The first controller to press a button becomes P1, the next becomes P2. Assignments are printed in the terminal:
 
 | Button (Xbox / PlayStation) | Action |
 |---|---|

@@ -997,7 +997,6 @@ int main(int argc, char **argv) {
     /* players follow who presses first, not the order macOS lists devices:
      * the first controller to press a button is P1, the next is P2 */
     int pad_player[2] = { -1, -1 }, players_taken = 0;
-    u32 player_last_press[2] = { 0, 0 };
     int ngc = 0;
     for (int i = 0; i < SDL_NumJoysticks() && ngc < 2; i++)
         if (SDL_IsGameController(i)) {
@@ -1027,17 +1026,6 @@ int main(int argc, char **argv) {
                         combo_pad_hint[pad_player[g]] = 1;
                         fprintf(stderr, "Controller '%s' is Player %d\n", SDL_GameControllerName(gcs[g]), pad_player[g] + 1);
                     }
-                    u32 now_ms = SDL_GetTicks();
-                    /* some pads appear as several devices and a duplicate can
-                     * claim P1: the pad in use takes P1 once P1 has gone idle */
-                    if (pad_player[g] == 1 && now_ms - player_last_press[0] > 10000) {
-                        int other = !g;
-                        pad_player[g] = 0;
-                        if (pad_player[other] == 0) pad_player[other] = 1;
-                        combo_pad_hint[0] = 1;
-                        fprintf(stderr, "Controller '%s' is now Player 1 (previous Player 1 was idle)\n", SDL_GameControllerName(gcs[g]));
-                    }
-                    if (pad_player[g] >= 0) player_last_press[pad_player[g]] = now_ms;
                 }
             if (e.type == SDL_QUIT) running = 0;
             else if (e.type == SDL_KEYDOWN && menu_open) {
@@ -1121,9 +1109,15 @@ int main(int argc, char **argv) {
                     if (gcs[g] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gcs[g])) == e.caxis.which && pad_player[g] >= 0) { combo_pad_hint[pad_player[g]] = 1; combo_start(pad_player[g], 1); }
             }
             else if (e.type == SDL_CONTROLLERDEVICEADDED && ngc < 2) {
-                gcs[ngc] = SDL_GameControllerOpen(e.cdevice.which);
-                fprintf(stderr, "Controller connected: '%s'\n", SDL_GameControllerName(gcs[ngc]));
-                ngc++;
+                /* SDL also announces pads already opened at start-up: opening
+                 * one twice would make a single pad act as both players */
+                SDL_GameController *added = SDL_GameControllerOpen(e.cdevice.which);
+                int known = 0;
+                for (int g = 0; g < ngc; g++) known |= gcs[g] == added;
+                if (added && !known) {
+                    gcs[ngc++] = added;
+                    fprintf(stderr, "Controller connected: '%s'\n", SDL_GameControllerName(added));
+                } else if (added) SDL_GameControllerClose(added);   /* drop the extra reference */
             }
         }
         const u8 *k = SDL_GetKeyboardState(NULL);
