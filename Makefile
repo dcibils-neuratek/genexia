@@ -36,7 +36,7 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: all recompile recompile-umk3 coverage app tests clean
+.PHONY: all recompile recompile-umk3 recompile-smk coverage app tests clean
 
 all: genexia
 
@@ -69,6 +69,10 @@ recompile:
 UMK3_ROM ?= roms/Ultimate Mortal Kombat 3 (USA).md
 recompile-umk3:
 	python3 tools/recompile.py "$(UMK3_ROM)" generated/umk3 --entries coverage/umk3.txt --listing docs/umk3.lst --prefix U_ --register recomp_register_umk3
+
+SMK_ROM ?= roms/snes/Super Mario Kart (USA).sfc
+recompile-smk:
+	python3 tools/recompile_65816.py "$(SMK_ROM)" generated/smk --entries coverage/smk.txt --listing docs/smk.lst --prefix S_ --register recomp_register_smk
 
 coverage: genexia
 	@mkdir -p coverage

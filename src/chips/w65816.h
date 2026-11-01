@@ -23,4 +23,5 @@ void w65_bus_idle(void);        /* one internal CPU cycle */
 
 void w65_reset(void);
 void w65_step(void);            /* one instruction, or one pending interrupt */
+void w65_exec(void);            /* one instruction at PC, no interrupt checks */
 #endif

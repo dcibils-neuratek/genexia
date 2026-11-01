@@ -15,6 +15,7 @@ EMU_STATE static u8 wram[0x20000];
 EMU_STATE static u8 sram[0x20000];
 EMU_STATE static u32 wmadd;
 EMU_STATE s64 snes_master;
+EMU_STATE int snes_rom_speed = 8;   /* master cycles per fast-ROM-area access */
 EMU_STATE static s64 line_start;
 EMU_STATE static int cur_line;
 EMU_STATE static u8 nmitimen, memsel, wrmpya, rdio, mdr;
@@ -189,7 +190,7 @@ static void reg_write(u32 off, u8 v) {
     case 0x420A: vtime = (u16)((vtime & 0xFF) | (v & 1) << 8); return;
     case 0x420B: dma_run(v); return;
     case 0x420C: hdmaen = v; return;
-    case 0x420D: memsel = v; return;
+    case 0x420D: memsel = v; snes_rom_speed = (v & 1) ? 6 : 8; return;
     default: break;
     }
     if (off >= 0x4300 && off < 0x4380) {
@@ -320,6 +321,52 @@ static void line_irq_setup(int line) {
     else irq_at = line_start + (s64)htime * 4;              /* H, or H and V */
 }
 
+/* -------------------------------------------- recompiled block dispatch
+ * Blocks are keyed by 24-bit PC and the M/X flags, because the same bytes
+ * decode differently in 8- and 16-bit modes. Anything else (emulation mode,
+ * code in RAM, addresses the recompiler never saw) runs on the interpreter. */
+#include <stdio.h>
+#include <stdlib.h>
+typedef void (*w65fn)(void);
+static w65fn *block_bank[256];
+int snes_force_interp;
+void (*snes_register_game)(void);
+static FILE *miss_log;
+static u8 *miss_seen;
+u64 snes_blocks_run, snes_interp_run;
+
+void snes_recomp_add(u32 pc, int mx, w65fn f) {
+    u32 b = (pc >> 16) & 0xFF;
+    if (!block_bank[b]) block_bank[b] = calloc(0x40000, sizeof(w65fn));
+    block_bank[b][(pc & 0xFFFF) << 2 | (u32)mx] = f;
+}
+
+static inline void cpu_slice(void) {
+    static u32 next_pc = 0xFFFFFFFF;
+    if (!w65.e && !w65.waiting && !w65.stopped && !w65.nmi_pending && !(w65.irq_line && !(w65.p & 0x04))) {
+        u32 pc = (u32)w65.pb << 16 | w65.pc;
+        int mx = (w65.p >> 4) & 3;
+        w65fn *t = snes_force_interp ? NULL : block_bank[w65.pb];
+        w65fn f = t ? t[(pc & 0xFFFF) << 2 | (u32)mx] : NULL;
+        if (f) { f(); snes_blocks_run++; next_pc = 0xFFFFFFFF; return; }
+        if (miss_log && pc != next_pc && ((w65.pc >= 0x8000 && w65.pb < 0x7E) || w65.pb >= 0x80 || (w65.pb >= 0x40 && w65.pb < 0x7E))) {
+            u32 k = pc << 2 | (u32)mx;
+            if (!(miss_seen[k >> 3] & (1 << (k & 7)))) {
+                miss_seen[k >> 3] |= (u8)(1 << (k & 7));
+                fprintf(miss_log, "%06X %d\n", pc, mx); fflush(miss_log);
+            }
+        }
+        u32 before = pc;
+        w65_step();
+        snes_interp_run++;
+        u32 after = (u32)w65.pb << 16 | w65.pc;
+        next_pc = (after > before && after - before <= 4) ? after : 0xFFFFFFFF;
+        return;
+    }
+    w65_step();
+    next_pc = 0xFFFFFFFF;
+}
+
 void snes_run_frame(void) {
     int vis = snes_ppu_overscan() ? 239 : 224;
     s64 base = snes_master;
@@ -343,7 +390,7 @@ void snes_run_frame(void) {
         line_irq_setup(line);
         while (snes_master < line_end) {
             if (irq_at >= 0 && snes_master >= irq_at) { irq_flag = 1; w65.irq_line = 1; irq_at = -1; }
-            w65_step();
+            cpu_slice();
         }
         base = line_end;
         snes_apu_run_to(snes_master);
@@ -387,9 +434,16 @@ const char *snes_load(void) {
 }
 
 void snes_reset(void) {
+    static int registered;
+    if (!registered) {
+        registered = 1;
+        if (snes_register_game) snes_register_game();
+        const char *p = getenv("SF2_MISSLOG");
+        if (p) { miss_log = fopen(p, "a"); miss_seen = calloc(1 << 23, 1); }
+    }
     memset(wram, 0x55, sizeof wram);
     memset(ch, 0xFF, sizeof ch);
-    wmadd = 0; nmitimen = 0; memsel = 0; hdmaen = 0;
+    wmadd = 0; nmitimen = 0; memsel = 0; hdmaen = 0; snes_rom_speed = 8;
     nmi_flag = irq_flag = in_vblank = joy_busy = 0;
     irq_at = -1;
     snes_ppu_reset();

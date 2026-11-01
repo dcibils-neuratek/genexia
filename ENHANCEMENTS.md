@@ -23,7 +23,7 @@ Status: ✅ done · 🚧 in progress · ⬜ planned
 |---|---|---|
 | ✅ | Backend architecture | `core/` front end, reusable `chips/`, `backends/<console>/`, `Backend` interface |
 | ✅ | SNES backend | 65C816, PPU with Mode 7, SPC700 + S-DSP, DSP-1, DMA/HDMA. Super Mario Kart plays: menus, racing, sound, save states |
-| ⬜ | SNES recompiler | Translate 65C816 code like the 68000 path |
+| ✅ | SNES recompiler | `tools/recompile_65816.py`: blocks per address and M/X mode, shared instruction logic with the interpreter. Super Mario Kart recompiled, pixel-identical in attract mode |
 | ⬜ | SNES widescreen | Wider Mode 7 view; karts and logic expect the normal view |
 | ⬜ | Nintendo 64 backend | MIPS CPU, RSP, RDP; true high-resolution widescreen is possible |
 

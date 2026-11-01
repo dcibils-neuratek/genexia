@@ -471,7 +471,11 @@ static void configure_game(int region_set) {
         game_is_sf2 = 0; vdp_hud_rules = 0;
         m68k_register_game = NULL;
         snprintf(game_title, sizeof game_title, "%s", snes_load());
-        fprintf(stderr, "Game: %s  (SNES, interpreter)\n", game_title);
+        /* recompiled code for this exact ROM, if we have it */
+        snes_register_game = !strcmp(game_title, "SUPER MARIO KART") && rom[0xFFDE] == 0x44 && rom[0xFFDF] == 0xEB
+                             ? recomp_register_smk : NULL;
+        snes_force_interp = m68k_force_interp || !snes_register_game;
+        fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
         return;
     }
     u16 hdr = (u16)(rom[0x18E] << 8 | rom[0x18F]);
@@ -964,7 +968,8 @@ int main(int argc, char **argv) {
         wav_close();
         { extern long vdp_stat_limited_lines, vdp_stat_dot_lines; fprintf(stderr, "lines over the hardware sprite limit: count %ld, pixels %ld\n", vdp_stat_limited_lines, vdp_stat_dot_lines); }
         fprintf(stderr, "frames %d  blocks %llu  interp-steps %llu  pc %06X\n", frames,
-                (unsigned long long)m68k_blocks_run, (unsigned long long)m68k_interp_run, cpu.pc);
+                (unsigned long long)(m68k_blocks_run + snes_blocks_run),
+                (unsigned long long)(m68k_interp_run + snes_interp_run), cpu.pc);
         return 0;
     }
 

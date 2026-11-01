@@ -10,7 +10,7 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
 | Street Fighter II' Special Champion Edition | Recompiled and built in; widescreen, killer combos, mana |
 | Ultimate Mortal Kombat 3 (USA) | Recompiled; widescreen; ROM loaded with `--rom` |
 | Any other Genesis ROM | Runs on the interpreter |
-| Super Mario Kart (USA), SNES | Playable on the interpreter (not recompiled yet); ROM loaded with `--rom` |
+| Super Mario Kart (USA), SNES | Recompiled, pixel-identical to the interpreter in attract mode; ROM loaded with `--rom` |
 | Other SNES ROMs | Run on the interpreter; only DSP-1 cartridges have their extra chip implemented |
 
 ## Architecture
@@ -20,7 +20,7 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
 | `src/core/` | Shared front end: window, filters, menu, input, audio output, pacing, run-ahead, save states, and the `Backend` interface (`backend.h`) |
 | `src/chips/` | Reusable chips with no console knowledge: 68000, Z80, 65C816, YM2612, PSG. Each talks to the machine through callbacks, so a new console reuses them directly |
 | `src/backends/<console>/` | Only what is unique to one console: memory map, video chip, wiring, frame timing |
-| `tools/` | Recompiler pipeline |
+| `tools/` | Recompiler pipeline: `recompile.py` (68000), `recompile_65816.py` (65C816, per address and M/X mode) |
 
 Every emulated variable is tagged `EMU_STATE`, which is why save states and
 run-ahead work on every backend without per-chip code.
@@ -44,7 +44,7 @@ disassemblies. Bring your own legally obtained ROMs. Put the SF2 ROM in the
 project folder and any others in `roms/`, then generate the game code once:
 
 ```bash
-make recompile && make recompile-umk3
+make recompile && make recompile-umk3 && make recompile-smk
 ```
 
 ## Build & run
@@ -198,6 +198,14 @@ the combo (0 = Fire, 1 = Thunder). Save each run's output as
 ```bash
 python3 tools/bake_combos.py <dir>
 ```
+
+### SNES controls
+
+On a gamepad, the buttons match their positions on a SNES pad: A / Cross = B,
+B / Circle = A, X / Square = Y, Y / Triangle = X, RB = R, RT = L, Start = Start,
+Back = Select. On the keyboard: Z = B, X = A, A = Y, S = X, D = R, C = L,
+Return = Start, Right Shift = Select. In Super Mario Kart, B accelerates and X
+toggles the map view.
 
 ### Options menu
 
