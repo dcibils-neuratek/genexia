@@ -172,14 +172,55 @@ static void bench_finish(void) {
 }
 #endif
 
+void asp_run(void);
+#ifdef ASP_CHECK
+/* Dev check: an audio task runs here first, the result is put aside and the
+ * RAM put back, the real RSP does it, and the two results are compared. */
+static u8 asp_before[N64_RDRAM_SIZE], asp_after[N64_RDRAM_SIZE];
+static int asp_pending;
+static long asp_tasks, asp_bad, asp_max;
+static double asp_sum;
+static void asp_check_start(void) {
+    memcpy(asp_before, n64_rdram, N64_RDRAM_SIZE);
+    asp_run();
+    memcpy(asp_after, n64_rdram, N64_RDRAM_SIZE);
+    memcpy(n64_rdram, asp_before, N64_RDRAM_SIZE);
+    asp_pending = 1;
+}
+static void asp_check_end(void) {
+    long n = 0, big = 0; u32 first = 0, firsta = 0, firstb = 0, lo = 0xFFFFFFFF, hi = 0;
+    asp_pending = 0;
+    for (u32 i = 0; i < N64_RDRAM_SIZE; i += 2) {
+        if (R16(&n64_rdram[i]) == R16(&asp_after[i])) continue;
+        if (i >= 0x1D7000 && i < 0x1D9000) continue;   /* the voices' saved states; output shows up elsewhere */
+        int d = (s16)R16(&n64_rdram[i]) - (s16)R16(&asp_after[i]);
+        if (d < 0) d = -d;
+        if (!n++) { first = i; firsta = R16(&n64_rdram[i]); firstb = R16(&asp_after[i]); }
+        if (d > 8) big++;
+        asp_sum += (double)d * d; if (d > asp_max) asp_max = d;
+        if (i < lo) lo = i;
+        if (i > hi) hi = i;
+    }
+    asp_tasks++;
+    if (0) for (u32 i = lo, k = 0; i <= hi && k < 10; i += 2) if (R16(&n64_rdram[i]) != R16(&asp_after[i])) { k++; fprintf(stderr, "  %06X rsp %04X mine %04X\n", i, R16(&n64_rdram[i]), R16(&asp_after[i])); }
+    asp_bad += big != 0;
+    if (0) fprintf(stderr, "audio task %ld: %ld differ, %ld by more than 8, %06X-%06X, first %06X rsp %04X mine %04X\n", asp_tasks, n, big, lo, hi, first, firsta, firstb);
+    if (asp_tasks % 500 == 0) fprintf(stderr, "audio: %ld tasks, %ld with a difference above 8, biggest %ld, squared error total %.0f\n", asp_tasks, asp_bad, asp_max, asp_sum);
+}
+#endif
+
 static void sp_status_write(u32 v) {
     if ((v & 1) && n64_dl_log) sp_task_debug();
 #ifndef N64_BENCH
     if (v & 1) wide_frame();
 #endif
     if (v & 1) { sp_status &= ~(u32)SP_HALT; st_sp_start++; }
+#ifdef ASP_CHECK
+    if ((v & 1) && R32(&n64_sp_mem[0xFC0]) == 1 + 1) asp_check_start();
+#endif
 #ifdef N64_BENCH
     if (v & 1) {
+        if (R32(&n64_sp_mem[0xFC0]) == 2) asp_run();
         if (n64_gfx_hook && R32(&n64_sp_mem[0xFC0]) == 1) n64_gfx_hook(R32(&n64_sp_mem[0xFC0 + 0x30]));
         bench_task = 800;
     }
@@ -194,6 +235,14 @@ static void sp_status_write(u32 v) {
         if (v & (1u << (9 + 2 * i))) sp_status &= ~(1u << (7 + i));
         if (v & (1u << (10 + 2 * i))) sp_status |= 1u << (7 + i);
     }
+#ifdef ASP_CHECK
+    static int inside;
+    if (asp_pending && !inside) {
+        inside = 1;
+        for (int i = 0; i < 100 && asp_pending && !n64_sp_halted(); i++) rsp_run(100000);
+        inside = 0;
+    }
+#endif
 }
 static u32 sp_reg_read(int r) {
     switch (r) {
@@ -247,6 +296,10 @@ void n64_rdp_full_sync(void) { mi_raise(MI_DP); }
 u32  n64_rsp_cop0_read(int r) { return r < 8 ? sp_reg_read(r) : dp_reg_read(r - 8); }
 void n64_rsp_cop0_write(int r, u32 v) { if (r < 8) sp_reg_write(r, v); else dp_reg_write(r - 8, v); }
 void n64_sp_break(void) {
+#ifdef ASP_CHECK
+    if (asp_pending) asp_check_end();
+#endif
+
     sp_status |= SP_BROKE | SP_HALT;
     if (sp_status & SP_INTR_BREAK) mi_raise(MI_SP);
 }

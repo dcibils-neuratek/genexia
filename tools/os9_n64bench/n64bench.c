@@ -12,6 +12,7 @@
 #include "bus.h"
 #ifdef GENEXIA_OS9
 #include <Multiverse.h>
+#include "m68k.h"
 pascal void Microseconds(void *t);
 static double now_ms(void) { unsigned long t[2]; Microseconds(t); return (t[0] * 4294967296.0 + t[1]) / 1000.0; }
 #else
@@ -78,6 +79,70 @@ static void gfx(u32 dl) {
     gfx_ms += now_ms() - t;
 }
 
+/* Sound Manager takes it from here: a ring the callback empties at interrupt time */
+#define SND_FRAMES 1024
+#define RING 8192
+static s16 ring[RING * 2];
+static volatile u32 ring_w, ring_r;
+static double asp_ms;
+static long snd_short;
+extern int n64_audio_rate;
+
+static pascal void snd_back(SndChannelPtr chan, SndDoubleBufferPtr buf) {
+    s16 *out = (s16 *)buf->dbSoundData;
+    u32 r = ring_r;
+    for (int i = 0; i < SND_FRAMES; i++) {
+        if (r != ring_w) { out[i * 2] = ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = ring[(r & (RING - 1)) * 2 + 1]; r++; }
+        else { out[i * 2] = 0; out[i * 2 + 1] = 0; snd_short++; }
+    }
+    ring_r = r;
+    buf->dbNumFrames = SND_FRAMES;
+    buf->dbFlags |= dbBufferReady;
+}
+
+static SndChannelPtr snd_chan;
+static SndDoubleBufferHeader snd_hdr;
+static void sound_start(void) {
+    if (SndNewChannel(&snd_chan, sampledSynth, 0x00C0 /* initStereo */, NULL) != noErr) { snd_chan = NULL; return; }
+    snd_hdr.dbhNumChannels = 2;
+    snd_hdr.dbhSampleSize = 16;
+    snd_hdr.dbhSampleRate = (UnsignedFixed)((u32)32000 << 16);
+    snd_hdr.dbhDoubleBack = NewSndDoubleBackUPP(snd_back);
+    for (int i = 0; i < 2; i++) {
+        SndDoubleBufferPtr b = (SndDoubleBufferPtr)NewPtrClear(sizeof(SndDoubleBuffer) + SND_FRAMES * 4);
+        b->dbNumFrames = SND_FRAMES;
+        b->dbFlags = dbBufferReady;
+        snd_hdr.dbhBufferPtr[i] = b;
+    }
+    if (SndPlayDoubleBuffer(snd_chan, &snd_hdr) != noErr) { SndDisposeChannel(snd_chan, true); snd_chan = NULL; }
+}
+static void sound_feed(void) {
+    static s16 t[1024 * 2];
+    u32 w = ring_w;
+    const int n = n64_audio_take(t, 1024);
+    for (int i = 0; i < n && w - ring_r < RING; i++, w++) {
+        ring[(w & (RING - 1)) * 2] = t[i * 2];
+        ring[(w & (RING - 1)) * 2 + 1] = t[i * 2 + 1];
+    }
+    ring_w = w;
+}
+
+/* Z A, X B, C Z, arrows the stick, Return Start, same as the other games */
+static int keys_read(void) {
+    static const struct { unsigned char code; unsigned short pad; } map[] = {
+        { 0x7E, PAD_UP }, { 0x7D, PAD_DOWN }, { 0x7B, PAD_LEFT }, { 0x7C, PAD_RIGHT },
+        { 0x06, PAD_A }, { 0x07, PAD_B }, { 0x08, PAD_C },
+        { 0x00, PAD_X }, { 0x01, PAD_Y }, { 0x02, PAD_Z }, { 0x24, PAD_START }, { 0x30, PAD_MODE },
+    };
+    unsigned char km[16];
+    GetKeys((void *)km);
+    int b = 0;
+    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (km[map[i].code >> 3] >> (map[i].code & 7) & 1) b |= map[i].pad;
+    pad_state[0] = (u16)b;
+    return km[0x35 >> 3] >> (0x35 & 7) & 1;   /* Esc quits */
+}
+
 static const char *gl_start(void) {
     static char why[80];
     Ptr mainp; Str255 err;
@@ -131,26 +196,45 @@ int main(int argc, char **argv) {
     n64_load();
     n64_register_game = recomp_register_sm64;
     n64_reset();
+#ifdef N64_GL
+    FILE *sf = fopen("n64script.txt", "r");
+    const int scripted = sf != NULL;
+    if (sf) fclose(sf);
+    sound_start();
+#else
+    const int scripted = 1;
+#endif
     double t0 = now_ms(), worst = 0, last = t0;
-    const double start = t0;
+    double next_due = t0 + 16.683;
 #ifdef N64_GL
     f3d_stats_t st0 = f3d_stats;
 #endif
     long long n0 = 0, i0 = 0;
     for (int fr = 1; fr <= FRAMES; fr++) {
         /* the same presses that reach the first course on the host */
+#ifdef N64_GL
+        EventRecord ev;
+        WaitNextEvent(everyEvent, &ev, 0, NULL);
+        if (!scripted) { if (keys_read()) break; if (fr == FRAMES) fr = 1; }
+        else
+#endif
         pad_state[0] = (fr >= 400 && fr < 410) || (fr >= 620 && fr < 630) || (fr >= 900 && fr < 910) || (fr >= 1200 && fr < 1210) ? PAD_START : 0;
-        if (fr > 3600 && fr % 40 < 4) pad_state[0] = PAD_A;   /* through the dialog */
-        if (fr > 5200) pad_state[0] = PAD_UP | (fr % 80 < 10 ? PAD_A : 0);
+        if (scripted && fr > 3600 && fr % 40 < 4) pad_state[0] = PAD_A;   /* through the dialog */
+        if (scripted && fr > 5200) pad_state[0] = PAD_UP | (fr % 80 < 10 ? PAD_A : 0);
 #ifdef N64_GL
         if (fr == 3300 || fr == 5400 || fr == 6600) want_shot = fr / 1000;
 #endif
         n64_run_frame();
+#ifdef N64_GL
+        sound_feed();
+#endif
         double t = now_ms();
 #ifdef N64_GL
         /* real speed, so it can be watched; the wait doesn't count as work */
-        const double due = start + fr * 16.683;
+        const double due = next_due;
+        next_due += 16.683;
         if (t < due) { const double w = t; while ((t = now_ms()) < due) {} idle_ms += t - w; t0 += t - w; last += t - w; }
+        else if (t > due + 100) next_due = t + 16.683;
 #endif
         if (t - last > worst) worst = t - last;
         last = t;
@@ -160,15 +244,18 @@ int main(int argc, char **argv) {
             fflush(log);
 #ifdef N64_GL
             const long d = f3d_stats.frames - st0.frames;
-            fprintf(log, "   %ld pictures, %.1f fps possible, gl %.1f ms each, %ld tris, %ld draws, %ld uploads each; %ld approx\n", d,
+            fprintf(log, "   %ld pictures, %.1f fps possible, gl %.1f ms each, %ld tris, %ld draws, %ld uploads each; sound short %ld\n", d,
                     d * 1000.0 / (t - t0), d ? gfx_ms / d : 0.0, d ? (f3d_stats.tris - st0.tris) / d : 0, d ? (f3d_stats.draws - st0.draws) / d : 0,
-                    d ? (f3d_stats.tex_uploads - st0.tex_uploads) / d : 0, f3d_stats.cc_approx);
+                    d ? (f3d_stats.tex_uploads - st0.tex_uploads) / d : 0, snd_short);
             fflush(log);
             st0 = f3d_stats; gfx_ms = 0;
 #endif
             n0 = r4300_native_cycles; i0 = r4300_interp_cycles; t0 = t; worst = 0;
         }
     }
+#ifdef N64_GL
+    if (snd_chan) SndDisposeChannel(snd_chan, true);
+#endif
     n64_debug_print();
     fprintf(log, "done\n");
     fclose(log);

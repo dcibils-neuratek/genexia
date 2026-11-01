@@ -186,4 +186,10 @@ clean:
 # Mario 64 through src/chips/f3d.c, off-screen on this Mac; needs recompile-sm64c.
 GLT_FLAGS := -O2 -std=gnu11 -w -DN64_BENCH $(INCS)
 n64gl: $(wildcard $(BUILD)/gen/n64/sm64c/recomp_*.o)
-	$(CC) $(GLT_FLAGS) tools/n64gl/gltest.c src/chips/f3d.c src/chips/r4300.c src/backends/n64/machine.c $^ -framework OpenGL -lm -o genexia-n64gl
+	$(CC) $(GLT_FLAGS) tools/n64gl/gltest.c src/chips/f3d.c src/chips/aspmain.c src/chips/r4300.c src/backends/n64/machine.c $^ -framework OpenGL -lm -o genexia-n64gl
+
+# Audio tasks through src/chips/aspmain.c and the real RSP, compared.
+n64-aspcheck: $(filter-out $(BUILD)/gen/n64/sm64/% $(BUILD)/backends/n64/machine.o,$(OBJS)) $(wildcard $(BUILD)/gen/n64/sm64c/recomp_*.o)
+	$(CC) -DASP_CHECK -c $(CFLAGS) src/backends/n64/machine.c -o $(BUILD)/asp_machine.o
+	$(CC) -c $(CFLAGS) src/chips/aspmain.c -o $(BUILD)/aspmain.o
+	$(CC) -o genexia-n64a $^ $(BUILD)/asp_machine.o $(BUILD)/aspmain.o $(SDL_LD) -lm
