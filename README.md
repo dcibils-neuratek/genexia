@@ -347,12 +347,14 @@ quits. `--rom` skips the selector.
 Toolbox window, the Sound Manager and the keyboard. `make os9` leaves
 `build/os9/Genexia.dsk`, with the app and `sf2.bin` when the ROM is present.
 
-It starts at a game selector listing every Genesis ROM (`.bin`, `.md`, `.gen`) next
-to the app or in a `roms` folder there. Street Fighter II' and Ultimate Mortal
-Kombat 3 are recompiled into the app; anything else runs on the interpreter, which
-is much slower on these machines.
+It starts at a game selector listing every Genesis and SNES ROM (`.bin`, `.md`, `.gen`,
+`.sfc`, `.smc`) next to the app or in a `roms` folder there. Use the arrows and Return,
+or click a row. Street Fighter II', Ultimate Mortal Kombat 3 and Super Mario Kart are
+recompiled into the app; anything else runs on the interpreter, which is much slower
+on these machines. SNES save RAM isn't kept between runs.
 
-Keys are arrows, Z X C, A S D, Return for Start and Esc to quit. F9 or F10 opens the
+Keys are arrows, Z X C, A S D, Return for Start and Esc to quit. On a SNES, Z is B, X is
+A, A is Y, S is X, C is L, D is R and Tab is Select. F9 or F10 opens the
 options menu: full screen, widescreen, Scale2x, scanlines, Vivid colour, picture
 shape, the sprite limit and game speed. Settings are kept in `genexia.cfg`. Move the
 mouse to the bottom of the picture for the speed bar and drag it, or use - and = (0 for

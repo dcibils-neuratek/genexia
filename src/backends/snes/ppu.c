@@ -669,7 +669,7 @@ static int render_obj_line(int line, int draw, const u32 *z)
 }
 
 /* --------------------------------------------------------------- compositing */
-static inline u16 blend(u32 x, u32 y, int halve)
+static inline u16 color_math(u32 x, u32 y, int halve)
 {
     if (!(P.cgadsub & 0x80)) {
         if (!halve) {
@@ -690,8 +690,8 @@ static inline u16 math_pixel(u32 a, u32 b, int keep, int allow)
     u32 col = keep ? a & 0x7FFF : 0;
     if (!allow || !((P.cgadsub & 0x3F) >> (a >> 16 & 7) & 1)) return (u16)col;
     int halve = (P.cgadsub & 0x40) && keep;
-    if (!(P.cgwsel & 2)) return blend(col, P.fixed_color, halve);
-    return blend(col, b & 0x7FFF, halve && (b >> 16 & 7) != SRC_BACK);
+    if (!(P.cgwsel & 2)) return color_math(col, P.fixed_color, halve);
+    return color_math(col, b & 0x7FFF, halve && (b >> 16 & 7) != SRC_BACK);
 }
 
 static inline u32 to_rgb(const u8 *t, u32 c)

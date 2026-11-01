@@ -82,19 +82,29 @@ static int cart_write(u32 a, u8 v) {
     return 0;
 }
 
+#ifdef GENEXIA_OS9
+u32 snes_t_ppu, snes_t_apu;
+static inline u32 now(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
+static void apu_catch_up(s64 m) { const u32 t = now(); snes_apu_run_to(m); snes_t_apu += now() - t; }
+static void ppu_line(int line) { const u32 t = now(); snes_ppu_render_line(line); snes_t_ppu += now() - t; }
+#else
+#define apu_catch_up snes_apu_run_to
+#define ppu_line snes_ppu_render_line
+#endif
+
 /* ------------------------------------------------------ B bus ($21xx) */
 static u8 bbus_read(u8 r) {
     if (r < 0x40) {
         if (r == 0x37) snes_ppu_latch_hv((int)((snes_master - line_start) / 4), cur_line);
         return snes_ppu_read(r);
     }
-    if (r < 0x80) { snes_apu_run_to(snes_master); return snes_apu_read(r & 3); }
+    if (r < 0x80) { apu_catch_up(snes_master); return snes_apu_read(r & 3); }
     if (r == 0x80) { u8 v = wram[wmadd]; wmadd = (wmadd + 1) & 0x1FFFF; return v; }
     return mdr;
 }
 static void bbus_write(u8 r, u8 v) {
     if (r < 0x40) { snes_ppu_write(r, v); return; }
-    if (r < 0x80) { snes_apu_run_to(snes_master); snes_apu_write(r & 3, v); return; }
+    if (r < 0x80) { apu_catch_up(snes_master); snes_apu_write(r & 3, v); return; }
     switch (r) {
     case 0x80: wram[wmadd] = v; wmadd = (wmadd + 1) & 0x1FFFF; break;
     case 0x81: wmadd = (wmadd & 0x1FF00) | v; break;
@@ -380,7 +390,7 @@ void snes_run_frame(void) {
             hdma_init();
         } else if (line <= vis) {
             hdma_line();
-            snes_ppu_render_line(line);
+            ppu_line(line);
         } else if (line == vis + 1) {
             in_vblank = 1; nmi_flag = 1;
             if (nmitimen & 0x80) w65.nmi_pending = 1;
@@ -393,7 +403,7 @@ void snes_run_frame(void) {
             cpu_slice();
         }
         base = line_end;
-        snes_apu_run_to(snes_master);
+        apu_catch_up(snes_master);
     }
     (void)update_hdma_nothing;
 }

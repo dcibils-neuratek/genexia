@@ -1,11 +1,12 @@
 /*
  * os9_main.c - a small front end for Mac OS 9 on PowerPC (Retro68).
  *
- * Runs the same Genesis core and recompiled games as the modern app, without
- * SDL: Toolbox window, Sound Manager and the keyboard. The game selector lists
- * every Genesis ROM next to the application or in a roms folder there.
+ * Runs the same Genesis and SNES cores and recompiled games as the modern app,
+ * without SDL: Toolbox window, Sound Manager and the keyboard. The game selector
+ * lists every ROM next to the application or in a roms folder there.
  *
- * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
+ * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit. On a
+ * SNES those are Z = B, X = A, A = Y, S = X, C = L, D = R, Tab = Select.
  * F1 = scanlines (faster), F2 = full screen at the display's own size,
  * F3 = set up a gamepad with InputSprocket, F9 or F10 = options menu,
  * - and = = game speed, 0 = normal speed, or the bar: move the mouse to the
@@ -25,6 +26,8 @@
 #include "bus.h"
 #include "combo.h"
 #include "enhance.h"
+#include "machine.h"
+#include "snes.h"
 #include "version.h"
 
 #define OUT_RATE 22050
@@ -49,12 +52,13 @@ static s16 ring[RING * 2];
 static volatile u32 ring_w, ring_r;
 static u32 rs_pos;                   /* 16.16 position in the native samples */
 static u32 rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) / OUT_RATE);
+static int snes_game, snd_rate = YM_SAMPLE_RATE, snd_gain = 4;   /* what the console puts out */
 /* game speed in percent: sound follows it, like a tape running faster */
 static int speed_pct = 100;
 static void set_speed(int pct) {
     pct = (pct + 2) / 5 * 5;
     speed_pct = pct < 50 ? 50 : pct > 200 ? 200 : pct;
-    rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) * speed_pct / 100 / OUT_RATE);
+    rs_step = (u32)(((u64)snd_rate << 16) * speed_pct / 100 / OUT_RATE);
 }
 
 static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
@@ -82,7 +86,7 @@ static void audio_flush(void) {
         const int i = (int)(rs_pos >> 16);
         if (w - ring_r < RING) {
             for (int ch = 0; ch < 2; ch++) {
-                int v = (ym_buf[i * 2 + ch] + psg_buf[i]) * 4;
+                int v = (ym_buf[i * 2 + ch] + psg_buf[i]) * snd_gain;
                 ring[(w & (RING - 1)) * 2 + ch] = (s16)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
             }
             w++;
@@ -129,6 +133,18 @@ static void sound_start(void) {
 /* -------------------------------------------------------------- frame */
 static void run_frame(void) {
     static s64 z80_debt, sched = -1;
+    if (snes_game) {
+        const u32 t0 = timebase();
+        snes_run_frame();
+        t_68k += timebase() - t0 - snes_t_ppu - snes_t_apu;
+        t_vdp += snes_t_ppu;
+        t_ym += snes_t_apu;
+        snes_t_ppu = snes_t_apu = 0;
+        aud_n = snes_apu_take(ym_buf, FRAME_SAMPLES);
+        memset(psg_buf, 0, (size_t)aud_n * sizeof(s16));
+        audio_flush();
+        return;
+    }
     if (sched < 0 || cpu.cyc - sched > 4 * M68K_CYCLES_PER_LINE) sched = cpu.cyc;
     for (int line = 0; line < LINES_PER_FRAME; line++) {
         const u32 t0 = timebase();
@@ -877,17 +893,37 @@ static int rom_code(const u8 *r) {
     if (hdr == 0xFC4C && !memcmp(r + 0x180, "GM T-097146", 11)) return 2;
     return 0;
 }
+enum { CODE_SMK = 3, CODE_SNES = 4 };      /* the other values: rom_code() */
+
+/* the whole file into rom[], because a SNES header can be in several places */
+static int rom_read(const FSSpec *spec) {
+    short ref;
+    long n = sizeof rom;
+    if (FSpOpenDF(spec, fsRdPerm, &ref) != noErr) return 0;
+    const OSErr e = FSRead(ref, &n, rom);
+    FSClose(ref);
+    if ((e != noErr && e != eofErr) || n < 0x200) return 0;
+    rom_size = (u32)n;
+    return 1;
+}
+static void snes_name(Game *g) {
+    const char *title = snes_load();
+    g->code = !strcmp(title, "SUPER MARIO KART") && rom[0xFFDE] == 0x44 && rom[0xFFDF] == 0xEB ? CODE_SMK : CODE_SNES;
+    snprintf(g->name, sizeof g->name, "%s", g->code == CODE_SMK ? "Super Mario Kart" : title);
+}
 
 static void game_probe(const FSSpec *spec) {
-    static u8 r[0x200];
-    short ref;
-    long n = sizeof r;
-    if (ngames == MAX_GAMES || FSpOpenDF(spec, fsRdPerm, &ref) != noErr) return;
-    const OSErr e = FSRead(ref, &n, r);
-    FSClose(ref);
-    if (e != noErr || n < 0x200 || memcmp(r + 0x100, "SEGA", 4)) return;
+    if (ngames == MAX_GAMES || !rom_read(spec)) return;
+    const u8 *r = rom;
     Game *g = &games[ngames];
     g->file = *spec;
+    if (memcmp(r + 0x100, "SEGA", 4)) {
+        if (!snes_detect()) return;
+        snes_name(g);
+        for (int i = 0; i < ngames; i++) if (!strcmp(games[i].name, g->name)) return;
+        ngames++;
+        return;
+    }
     g->code = rom_code(r);
     const char *t = (const char *)r + 0x150;
     int len = 48, j = 0;
@@ -905,7 +941,7 @@ static void game_probe(const FSSpec *spec) {
 }
 
 static void game_scan(short vol, long dir, int deep) {
-    static const char *const exts[] = { ".bin", ".md", ".gen" };
+    static const char *const exts[] = { ".bin", ".md", ".gen", ".sfc", ".smc" };
     for (short i = 1;; i++) {
         Str255 name;
         CInfoPBRec pb;
@@ -923,7 +959,7 @@ static void game_scan(short vol, long dir, int deep) {
             if (deep && !strcmp(c, "roms")) game_scan(vol, pb.dirInfo.ioDrDirID, 0);
             continue;
         }
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < 5; k++) {
             const int x = (int)strlen(exts[k]);
             FSSpec spec;
             if (n > x && !strcmp(c + n - x, exts[k]) && FSMakeFSSpec(vol, dir, name, &spec) == noErr) { game_probe(&spec); break; }
@@ -946,8 +982,9 @@ static void select_draw(u32 *fb, int sel, int top) {
     for (int i = top; i < ngames && i < top + ROWS; i++) {
         const int y = TOP + (i - top) * RH, on = i == sel;
         if (on) fx_box(fb, ST, W, H, 6, y - 4, W - 6, y + 12, 0x3040A0, 0.9f);
-        const char *tag = games[i].code ? "RECOMPILED" : "INTERPRETED";
-        const u32 tc = games[i].code ? 0x60E090 : 0x8090B0, c = on ? 0xFFFFFF : 0xB0B8D0;
+        const int fast = games[i].code && games[i].code != CODE_SNES;
+        const char *tag = fast ? "RECOMPILED" : "INTERPRETED";
+        const u32 tc = fast ? 0x60E090 : 0x8090B0, c = on ? 0xFFFFFF : 0xB0B8D0;
         const int tagw = fx_text_width(tag, 1);
         char name[64];
         snprintf(name, sizeof name, "%s", games[i].name);
@@ -976,6 +1013,17 @@ static const Game *game_select(void) {
             if (press(0x24)) return &games[sel];
         }
         if (press(0x78)) toggle_full();
+        {   /* a click on a row plays it */
+            static int was_down;
+            const int down = Button();
+            if (down && !was_down && map_dh) {
+                Point at = LMGetMouseLocation(), o = { pic.top, pic.left };
+                if (!dsp_port) { SetPort((GrafPtr)win); LocalToGlobal(&o); }
+                const int y = (at.v - o.v) * 240 / map_dh, row = y < 46 ? -1 : (y - 46) / 18;
+                if (row >= 0 && row < 9 && top + row < ngames) return &games[top + row];
+            }
+            was_down = down;
+        }
         if (sel < top) top = sel;
         if (sel >= top + 9) top = sel - 8;
         select_draw(fb, sel, top);
@@ -987,13 +1035,22 @@ static const Game *game_select(void) {
 }
 
 static int game_load(const Game *g) {
-    short ref;
-    long n = sizeof rom;
-    if (FSpOpenDF(&g->file, fsRdPerm, &ref) != noErr) return 0;
-    const OSErr e = FSRead(ref, &n, rom);
-    FSClose(ref);
-    if ((e != noErr && e != eofErr) || n < 0x200) return 0;
-    rom_size = (u32)n;
+    char l[100];
+    if (!rom_read(&g->file)) return 0;
+    snprintf(l, sizeof l, "Game: %s (%s)", g->name, g->code && g->code != CODE_SNES ? "recompiled" : "interpreter");
+    log_line(l);
+    if (g->code >= CODE_SMK) {
+        Game again = *g;
+        snes_name(&again);
+        snes_register_game = g->code == CODE_SMK ? recomp_register_smk : NULL;
+        snes_force_interp = !snes_register_game;
+        snes_game = 1;
+        snd_rate = SNES_DSP_RATE;
+        snd_gain = 2;
+        game_is_sf2 = 0;
+        vdp_hud_rules = 0;
+        return 1;
+    }
     m68k_register_game = g->code == 1 ? recomp_register : g->code == 2 ? recomp_register_umk3 : NULL;
     m68k_force_interp = !m68k_register_game;
     game_is_sf2 = g->code == 1;
@@ -1007,9 +1064,6 @@ static int game_load(const Game *g) {
         else { if (v & 1) jp = 1; if (v & 4) us = 1; if (v & 8) eu = 1; }
     }
     region_version = us ? 0xA0 : jp ? 0x20 : eu ? 0xE0 : 0xA0;
-    char l[100];
-    snprintf(l, sizeof l, "Game: %s (%s)", g->name, g->code ? "recompiled" : "interpreter");
-    log_line(l);
     return 1;
 }
 
@@ -1047,12 +1101,16 @@ int main(void) {
     const Game *game = game_select();
     if (game) {
         if (!game_load(game)) fail("\pThat game could not be read.");
-        bus_reset();
+        set_speed(speed_pct);
         vdp_init();
-        z80_reset();
-        ym2612_reset();
-        psg_reset();
-        m68k_reset();
+        if (snes_game) snes_reset();
+        else {
+            bus_reset();
+            z80_reset();
+            ym2612_reset();
+            psg_reset();
+            m68k_reset();
+        }
         sound_start();
     }
 
@@ -1063,7 +1121,7 @@ int main(void) {
     const u32 t_cal = timebase();
     while (TickCount() < mark + 30) { }
     const u32 tb_sec = (u32)((u64)(timebase() - t_cal) * 60147 / 30000);
-    const u32 frame_tb = (u32)((u64)tb_sec * 1000 / 59923);   /* the Genesis runs at 59.923 Hz */
+    const u32 frame_tb = (u32)((u64)tb_sec * 1000 / (snes_game ? 60099 : 59923));   /* each console's own frame rate */
     char cal[60];
     snprintf(cal, sizeof cal, "Timebase: %lu per second", (unsigned long)tb_sec);
     log_line(cal);
@@ -1159,7 +1217,8 @@ int main(void) {
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
                 const u32 p = all / 100 + 1;
-                snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%  AltiVec lines %u", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p), vdp_altivec_lines);
+                if (snes_game) snprintf(l, sizeof l, "Split  65816 %d%%  PPU %d%%  APU %d%%", (int)(t_68k / p), (int)(t_vdp / p), (int)(t_ym / p));
+                else snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%  AltiVec lines %u", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p), vdp_altivec_lines);
                 vdp_altivec_lines = 0;
                 log_line(l);
                 t_68k = t_z80 = t_vdp = t_ym = 0;

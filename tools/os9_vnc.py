@@ -113,7 +113,7 @@ class Vnc:
         syms = [KEYS.get(p, ord(p[0])) for p in name.split('+')]
         for k in syms:
             self.keysym(k, 1)
-            time.sleep(0.03)
+            time.sleep(0.15)                 # games poll the keyboard
         for k in reversed(syms):
             self.keysym(k, 0)
             time.sleep(0.03)

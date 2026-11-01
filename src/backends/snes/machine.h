@@ -12,4 +12,7 @@ extern u64 snes_blocks_run, snes_interp_run;
 extern void (*snes_register_game)(void);   /* recompiled code of the loaded game */
 void snes_recomp_add(u32 pc, int mx, void (*f)(void));
 void recomp_register_smk(void);
+#ifdef GENEXIA_OS9
+extern u32 snes_t_ppu, snes_t_apu;   /* time spent there, for the log */
+#endif
 #endif
