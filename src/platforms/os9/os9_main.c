@@ -991,14 +991,17 @@ int main(void) {
     snprintf(cal, sizeof cal, "Timebase: %lu per second", (unsigned long)tb_sec);
     log_line(cal);
 
-    int shown = 0, skipped = 0, ran = 0, queue_avg = 2000 * 16;
-    u32 t_emu = 0, t_vid = 0, t_other = 0, t_worst = 0, t_mark = timebase(), deadline = t_mark, t_loop = t_mark;
+    int shown = 0, skipped = 0, ran = 0, queue_avg = 2000 * 16, loops = 0;
+    u32 t_emu = 0, t_vid = 0, t_events = 0, t_other = 0, t_worst = 0, t_mark = timebase(), deadline = t_mark, t_loop = t_mark;
     mark = TickCount();
     while (game) {
         const u32 t_top = timebase();
         if (t_top - t_loop > t_worst) t_worst = t_top - t_loop;
         t_loop = t_top;
-        pump();
+        /* the system runs other programs in here, sometimes for 1/4 second */
+        if (!(++loops & 31) || Button()) pump();
+        const u32 t_pumped = timebase();
+        t_events += t_pumped - t_top;
         read_keys();
         keys_poll();
         if (press(0x35)) break;              /* Esc */
@@ -1025,7 +1028,7 @@ int main(void) {
 
         /* more than a frame late: run the game but don't draw */
         const u32 t0 = timebase();
-        t_other += t0 - t_top;
+        t_other += t0 - t_pumped;
         const int behind = (s32)(t0 - deadline) > (s32)frame_tb && skipped < 3;
         vdp_skip_render = behind;
         run_frame();
@@ -1040,9 +1043,11 @@ int main(void) {
          * instead of ever holding a frame back. */
         queue_avg += (int)(ring_w - ring_r) - queue_avg / 16;
         const int excess = queue_avg / 16 - 2000;
-        deadline += frame_tb + (u32)((s32)(frame_tb >> 16) * (excess > 2000 ? 2000 : excess < -2000 ? -2000 : excess) / 8);
+        deadline += frame_tb + (u32)((s32)(frame_tb >> 16) * (excess > 6000 ? 6000 : excess < -6000 ? -6000 : excess) / 8);
         while ((s32)(timebase() - deadline) < 0) { }
-        if ((s32)(timebase() - deadline) > (s32)(tb_sec / 2)) deadline = timebase();
+        /* stalled: carry on from now, because racing to catch up floods the
+         * sound queue and draws nothing */
+        if ((s32)(timebase() - deadline) > (s32)(frame_tb * 3)) deadline = timebase();
         if (TickCount() - mark >= 60) {
             char t[80];
             const u32 ticks = TickCount() - mark, all = timebase() - t_mark;
@@ -1052,14 +1057,14 @@ int main(void) {
             if (!full_screen && !dsp_port) SetWTitle(win, (ConstStr255Param)t);
             {
                 char l[140];
-                snprintf(l, sizeof l, "%s  Other %d%%  worst %d ms  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1,
-                         (int)(t_other / (all / 100 + 1)), (int)((u64)t_worst * 1000 / tb_sec), video_path,
+                snprintf(l, sizeof l, "%s  Events %d%%  Other %d%%  worst %d ms  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1,
+                         (int)(t_events / (all / 100 + 1)), (int)(t_other / (all / 100 + 1)), (int)((u64)t_worst * 1000 / tb_sec), video_path,
                          every_other ? " alt-lines" : "", dsp_port ? " full640" : full_screen ? " full" : "", snd_chan ? "on" : "off",
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
             }
             shown = ran = 0;
-            t_emu = t_vid = t_other = t_worst = 0;
+            t_emu = t_vid = t_events = t_other = t_worst = 0;
             t_mark = timebase();
             mark = TickCount();
         }
