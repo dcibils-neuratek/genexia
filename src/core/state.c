@@ -15,9 +15,14 @@
 static u8 *sec;
 static unsigned long sec_size;
 
+static const char *sec_name = "__emustate";
+
+/* consoles with large memory keep their state in their own section */
+void state_use_section(const char *name) { sec_name = name; sec = NULL; }
+
 static void state_init(void)
 {
-    if (!sec) sec = getsectiondata(&_mh_execute_header, "__DATA", "__emustate", &sec_size);
+    if (!sec) sec = getsectiondata(&_mh_execute_header, "__DATA", sec_name, &sec_size);
 }
 
 size_t state_size(void) { state_init(); return sec_size; }

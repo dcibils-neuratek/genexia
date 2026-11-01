@@ -28,7 +28,7 @@ typedef struct {
 extern M68K cpu;
 
 /* ------------------------------------------------------------ memory */
-extern u8  rom[0x400000];
+extern u8  rom[0x4000000];   /* cartridge image: up to 64 MB (N64) */
 extern u8  ram[0x10000];
 extern u32 rom_size;
 

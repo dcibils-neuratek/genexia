@@ -4,6 +4,9 @@
 *.md.state
 *.state
 *.sfc
+*.z64
+*.n64
+*.v64
 *.smc
 *.gen
 roms/

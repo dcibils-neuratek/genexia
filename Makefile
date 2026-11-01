@@ -12,7 +12,7 @@ SDL_CF   := $(shell sdl2-config --cflags)
 SDL_LD   := $(shell sdl2-config --libs)
 # core/ = shared front end, chips/ = reusable chips with no console knowledge,
 # backends/<console>/ = what is unique to one console
-INCS     := -Isrc -Isrc/core -Isrc/chips -Isrc/backends/genesis -Isrc/backends/snes
+INCS     := -Isrc -Isrc/core -Isrc/chips -Isrc/backends/genesis -Isrc/backends/snes -Isrc/backends/n64
 CFLAGS   := -O2 -std=c11 -Wall -Wextra -Wno-unused-variable -Wno-unused-parameter $(INCS) $(SDL_CF)
 GENFLAGS := -O1 -std=c11 -w $(INCS)
 BUILD    := build
@@ -23,7 +23,8 @@ RUNTIME  := src/core/main.c src/core/state.c \
             src/backends/genesis/bus.c src/backends/genesis/vdp.c \
             src/backends/genesis/combo.c src/backends/genesis/fx.c \
             src/chips/w65816.c src/backends/snes/machine.c src/backends/snes/ppu.c \
-            src/backends/snes/apu.c src/backends/snes/dsp1.c
+            src/backends/snes/apu.c src/backends/snes/dsp1.c \
+            src/chips/r4300.c src/chips/rsp.c src/chips/rdp.c src/backends/n64/machine.c
 GEN      := $(sort $(wildcard generated/recomp_*.c generated/*/recomp_*.c))
 OBJS     := $(RUNTIME:src/%.c=$(BUILD)/%.o) $(GEN:generated/%.c=$(BUILD)/gen/%.o)
 
@@ -101,6 +102,9 @@ tests:
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_ppu src/backends/snes/ppu.c src/backends/snes/test_ppu.c && $(BUILD)/test_ppu | tail -1
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_apu src/backends/snes/apu.c src/backends/snes/dsp1.c src/backends/snes/test_apu.c -lm && $(BUILD)/test_apu | tail -1
 	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_sound src/chips/z80.c src/chips/ym2612.c src/chips/psg.c src/chips/test_sound.c -lm && $(BUILD)/test_sound
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_r4300 src/chips/r4300.c src/chips/test_r4300.c && $(BUILD)/test_r4300
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_rsp src/chips/test_rsp.c && $(BUILD)/test_rsp
+	$(CC) -O2 -std=c11 $(INCS) -o $(BUILD)/test_rdp src/chips/rdp.c src/chips/test_rdp.c -lm && $(BUILD)/test_rdp
 
 clean:
 	rm -rf $(BUILD) genexia Genexia.app

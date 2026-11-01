@@ -21,6 +21,7 @@
 #include "backend.h"
 #include "snes.h"
 #include "machine.h"
+#include "n64_machine.h"
 
 extern u64 m68k_blocks_run, m68k_interp_run;
 
@@ -116,6 +117,16 @@ static void run_frame_snes(void) {
     }
 }
 
+static void run_frame_n64(void) {
+    n64_run_frame();
+    int room = AUD_MAX - aud_n;
+    int n = n64_audio_take(ym_buf + aud_n * 2, room);
+    if (n > 0) {
+        memset(psg_buf + aud_n, 0, (size_t)n * sizeof(s16));
+        if (!audio_discard) aud_n += n;
+    }
+}
+
 static void run_frame_genesis(void) {
     EMU_STATE static s64 z80_debt;
     EMU_STATE static s64 sched = -1;      /* absolute 68k-cycle timeline: exactly 488 per line */
@@ -177,7 +188,11 @@ static void monkey_input(unsigned *rng, int f) {
     }
 }
 
-static void run_frame(void) { be->run_frame(); }
+static Backend backend_n64;
+static void run_frame(void) {
+    be->run_frame();
+    if (be == &backend_n64) backend_n64.sample_rate = n64_audio_rate;   /* set by the game */
+}
 static void power_on(void);
 static void save_ppm(const char *path);
 
@@ -464,9 +479,20 @@ static void reset_genesis(void);
 static void reset_snes(void) { vdp_init(); snes_reset(); }
 static const Backend backend_genesis = { "Genesis", YM_SAMPLE_RATE, 4.0, reset_genesis, run_frame_genesis };
 static const Backend backend_snes = { "SNES", SNES_DSP_RATE, 1.8, reset_snes, run_frame_snes };
+static void reset_n64(void) { vdp_init(); n64_reset(); }
+static Backend backend_n64 = { "Nintendo 64", 32000, 1.0, reset_n64, run_frame_n64 };
 
 static void configure_game(int region_set) {
     be = &backend_genesis;
+    if (n64_detect()) {
+        be = &backend_n64;
+        game_is_sf2 = 0; vdp_hud_rules = 0;
+        m68k_register_game = NULL;
+        state_use_section("__n64state");
+        snprintf(game_title, sizeof game_title, "%s", n64_load());
+        fprintf(stderr, "Game: %s  (Nintendo 64, interpreter)\n", game_title);
+        return;
+    }
     if (memcmp(rom + 0x100, "SEGA", 4) && snes_detect()) {
         be = &backend_snes;
         game_is_sf2 = 0; vdp_hud_rules = 0;
@@ -709,7 +735,7 @@ static const char *menu_value(int i, char *b, size_t n) {
     static const char *filters[] = { "Sharp", "Smooth", "Scanlines", "CRT" };
     static const char *strengths[] = { "Soft", "Medium", "Strong" };
     switch (i) {
-    case M_WIDE:     return vdp_widescreen ? "16:9" : "Off";
+    case M_WIDE:     return be == &backend_n64 ? "-" : vdp_widescreen ? "16:9" : "Off";
     case M_FILTER:   return filters[video_filter];
     case M_STRENGTH: return video_filter >= FILTER_SCANLINES ? strengths[scan_strength] : "-";
     case M_SHAPE:    return vdp_widescreen ? "-" : pic_shape ? "TV 4:3" : "Square pixels";
@@ -721,7 +747,7 @@ static const char *menu_value(int i, char *b, size_t n) {
 }
 static void menu_change(int i, int dir) {
     switch (i) {
-    case M_WIDE:     vdp_widescreen = !vdp_widescreen; menu_dirty = 1; break;
+    case M_WIDE:     if (be != &backend_n64) { vdp_widescreen = !vdp_widescreen; menu_dirty = 1; } break;
     case M_FILTER:   video_filter = (video_filter + dir + FILTER_COUNT) % FILTER_COUNT; break;
     case M_STRENGTH: scan_strength = (scan_strength + dir + 3) % 3; break;
     case M_SHAPE:    pic_shape = !pic_shape; break;
@@ -789,7 +815,7 @@ static void on_signal(int s) { (void)s; quit_req = 1; }
 int main(int argc, char **argv) {
     const char *rom_path = NULL, *shot = NULL, *wav = NULL;
     int frames = 0, scale = 3, headless = 0, state_test = 0;
-    int wide_opt = -1, limit_opt = -1, region_set = 0;
+    int wide_opt = -1, limit_opt = -1, region_set = 0, runahead_cli = 0;
     unsigned monkey = 0;
     /* saved options first (window mode only), command line overrides them */
     int gui = 1;
@@ -818,7 +844,7 @@ int main(int argc, char **argv) {
             int m = atoi(argv[++i]);
             if (m <= 0) combo_mana_enabled = 0; else combo_mana_seconds = m;
         }
-        else if (!strcmp(argv[i], "--runahead") && i + 1 < argc) runahead = atoi(argv[++i]) < 0 ? 0 : atoi(argv[i]) > 3 ? 3 : atoi(argv[i]);
+        else if (!strcmp(argv[i], "--runahead") && i + 1 < argc) runahead_cli = 1, runahead = atoi(argv[++i]) < 0 ? 0 : atoi(argv[i]) > 3 ? 3 : atoi(argv[i]);
         else if (!strcmp(argv[i], "--state-test")) state_test = 1;
         else if (!strcmp(argv[i], "--sprite-limit")) limit_opt = 0;
         else if (!strcmp(argv[i], "--no-sprite-limit")) limit_opt = 1;
@@ -859,6 +885,7 @@ int main(int argc, char **argv) {
     snprintf(key_wide, sizeof key_wide, "wide_%02X%02X", rom[0x18E], rom[0x18F]);
     snprintf(key_limit, sizeof key_limit, "limit_%02X%02X", rom[0x18E], rom[0x18F]);
     int enhanced = vdp_hud_rules != 0 || (be == &backend_snes && snes_register_game);
+    if (be == &backend_n64 && !runahead_cli) runahead = 0;   /* 8 MB per snapshot: opt-in */
     vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
     vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);
     power_on();
@@ -903,6 +930,8 @@ int main(int argc, char **argv) {
             }
             if (monkey) monkey_input(&monkey, f);
             { extern int vdp_layout_debug; vdp_layout_debug = getenv("SF2_LAYOUT") && f == atoi(getenv("SF2_LAYOUT")); }
+            { extern int rdp_debug; rdp_debug = getenv("SF2_RDPLOG") && f == atoi(getenv("SF2_RDPLOG")); }
+            { extern int n64_dl_log; if (getenv("SF2_RDPLOG")) { int t = atoi(getenv("SF2_RDPLOG")); if (f == t - 2) n64_dl_log = 2; if (f > t) n64_dl_log = 0; } }
             vdp_skip_render = getenv("SF2_LIVELIKE") != NULL;   /* dev: as the window loop does */
             run_frame();
             vdp_skip_render = 0;
@@ -971,6 +1000,7 @@ int main(int argc, char **argv) {
         }
         wav_close();
         { extern long vdp_stat_limited_lines, vdp_stat_dot_lines; fprintf(stderr, "lines over the hardware sprite limit: count %ld, pixels %ld\n", vdp_stat_limited_lines, vdp_stat_dot_lines); }
+        if (be == &backend_n64) n64_debug_print();
         fprintf(stderr, "frames %d  blocks %llu  interp-steps %llu  pc %06X\n", frames,
                 (unsigned long long)(m68k_blocks_run + snes_blocks_run),
                 (unsigned long long)(m68k_interp_run + snes_interp_run), cpu.pc);
@@ -1052,7 +1082,7 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_ESCAPE: running = 0; break;
                 case SDL_SCANCODE_P: paused = !paused; break;
                 case SDL_SCANCODE_F1: power_on(); break;
-                case SDL_SCANCODE_F2: vdp_widescreen = !vdp_widescreen; break;
+                case SDL_SCANCODE_F2: if (be != &backend_n64) vdp_widescreen = !vdp_widescreen; break;
                 case SDL_SCANCODE_F3: video_filter = (video_filter + 1) % FILTER_COUNT; break;
                 case SDL_SCANCODE_F10: menu_open = 1; menu_sel = 0; break;
                 case SDL_SCANCODE_F4: vdp_no_sprite_limit = !vdp_no_sprite_limit; break;
@@ -1124,6 +1154,21 @@ int main(int argc, char **argv) {
         u16 live_pad[2] = { keyboard_pad(k, 0), keyboard_pad(k, 1) };
         for (int g = 0; g < ngc; g++)
             if (pad_player[g] >= 0) live_pad[pad_player[g]] |= controller_pad(gcs[g]);
+        n64_stick_x[0] = n64_stick_x[1] = n64_stick_y[0] = n64_stick_y[1] = 0;
+        n64_c_buttons[0] = n64_c_buttons[1] = 0;
+        for (int g = 0; g < ngc; g++) if (pad_player[g] >= 0) {  /* analog sticks for N64 */
+            int pl = pad_player[g];
+            int ax = SDL_GameControllerGetAxis(gcs[g], SDL_CONTROLLER_AXIS_LEFTX);
+            int ay = SDL_GameControllerGetAxis(gcs[g], SDL_CONTROLLER_AXIS_LEFTY);
+            int rx = SDL_GameControllerGetAxis(gcs[g], SDL_CONTROLLER_AXIS_RIGHTX);
+            int ry = SDL_GameControllerGetAxis(gcs[g], SDL_CONTROLLER_AXIS_RIGHTY);
+            if (abs(ax) > 3000) n64_stick_x[pl] = (u8)(s8)(ax * 80 / 32767);
+            if (abs(ay) > 3000) n64_stick_y[pl] = (u8)(s8)(-ay * 80 / 32767);
+            if (ry < -16000) n64_c_buttons[pl] |= 1;
+            if (ry > 16000) n64_c_buttons[pl] |= 2;
+            if (rx < -16000) n64_c_buttons[pl] |= 4;
+            if (rx > 16000) n64_c_buttons[pl] |= 8;
+        }
         pad_state[0] = live_pad[0];
         pad_state[1] = live_pad[1];
 

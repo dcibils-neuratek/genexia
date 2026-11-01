@@ -3,7 +3,7 @@
 **Genexia is a console recompilation platform for macOS.** It translates a game's
 code into native Mac code and runs it on reimplemented console hardware, with one
 shared front end for every console: video filters, options menu, controls, speed,
-run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
+run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES and Nintendo 64.
 
 | Game | Status |
 |---|---|
@@ -12,13 +12,14 @@ run-ahead and save states. Backends today: Sega Genesis / Mega Drive and SNES.
 | Any other Genesis ROM | Runs on the interpreter |
 | Super Mario Kart (USA), SNES | Recompiled, widescreen races (Mode 7 draws real extra track); ROM loaded with `--rom` |
 | Other SNES ROMs | Run on the interpreter; only DSP-1 cartridges have their extra chip implemented |
+| Super Mario 64 (USA), Nintendo 64 | Runs on the interpreter at about 3x full speed; not recompiled yet, 4:3 only; ROM loaded with `--rom` |
 
 ## Architecture
 
 | Folder | What goes there |
 |---|---|
 | `src/core/` | Shared front end: window, filters, menu, input, audio output, pacing, run-ahead, save states, and the `Backend` interface (`backend.h`) |
-| `src/chips/` | Reusable chips with no console knowledge: 68000, Z80, 65C816, YM2612, PSG. Each talks to the machine through callbacks, so a new console reuses them directly |
+| `src/chips/` | Reusable chips with no console knowledge: 68000, Z80, 65C816, YM2612, PSG, R4300i, RSP, RDP. Each talks to the machine through callbacks, so a new console reuses them directly |
 | `src/backends/<console>/` | Only what is unique to one console: memory map, video chip, wiring, frame timing |
 | `tools/` | Recompiler pipeline: `recompile.py` (68000), `recompile_65816.py` (65C816, per address and M/X mode) |
 
@@ -210,6 +211,23 @@ toggles the map view.
 Super Mario Kart's 1-player mode is split-screen too: you on top, the course map
 or rear view below. Pick 1P GAME with the cursor on the title menu, then confirm
 with Start or B.
+
+### Nintendo 64
+
+```bash
+./Genexia.app/Contents/MacOS/genexia --rom "roms/n64/Super Mario 64 (USA).z64"
+```
+
+The R4300i, the RSP (running the game's real graphics and audio microcode) and a
+software RDP are all emulated, so there is no per-game graphics plugin. The CIC-6102
+boot is shortcut, so other games using that chip may boot, but only Super Mario 64
+has been tested. Save data goes to emulated EEPROM. Widescreen is off for N64 and
+run-ahead defaults to 0, since each state is 12 MB.
+
+On a gamepad: left stick = analog stick (the D-pad does the same at full tilt),
+A = A, B or X = B, RT = Z, RB = R, Back = L, right stick = C buttons, Y = C-Up,
+Start = Start. On the keyboard: arrows = stick, Z = A, X or A = B, C = Z, D = R,
+S = C-Up, Return = Start, Right Shift = L.
 
 ### Options menu
 
