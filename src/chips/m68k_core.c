@@ -15,6 +15,7 @@ static blockfn *blocktab;           /* indexed by pc>>1 for pc < 0x400000 */
 static u8 *miss_seen;               /* ROM addresses already logged as misses */
 static FILE *miss_log;
 u64 m68k_blocks_run, m68k_interp_run;
+u32 m68k_native_cycles, m68k_interp_cycles;
 
 void recomp_add(u32 pc, blockfn f) {
     if (pc < 0x400000) blocktab[pc >> 1] = f;
@@ -70,12 +71,16 @@ void m68k_run(s64 until) {
         u32 pc = cpu.pc & 0xFFFFFF;
         blockfn f = (pc < 0x400000 && !m68k_force_interp) ? blocktab[pc >> 1] : NULL;
         if (f) {
+            const s64 c0 = cpu.cyc;
             f();
+            m68k_native_cycles += (u32)(cpu.cyc - c0);
             m68k_blocks_run++;
             interp_next = 0xFFFFFFFF;
         } else {
             if (pc != interp_next) log_miss(pc);
+            const s64 c0 = cpu.cyc;
             m68k_interp_step();
+            m68k_interp_cycles += (u32)(cpu.cyc - c0);
             m68k_interp_run++;
             interp_next = cpu.ppc + 2;  /* approximate: only used to detect jumps */
             if (cpu.pc > cpu.ppc && cpu.pc - cpu.ppc <= 10) interp_next = cpu.pc;

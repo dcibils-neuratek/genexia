@@ -88,18 +88,43 @@ def length(op, mx):
 
 ALU = {0x00: 'ora', 0x20: 'and', 0x40: 'eor', 0x60: 'adc', 0x80: 'sta', 0xA0: 'lda', 0xC0: 'cmp', 0xE0: 'sbc'}
 MODES = {0x01: 'a_inx_v({b})', 0x03: 'a_sr_v({b})', 0x05: 'a_dp_v({b})', 0x07: 'a_inl_v({b})',
-         0x0D: 'a_abs_v({w})', 0x0F: '{l}', 0x11: 'a_iny_v({b},{W})', 0x12: 'a_ind_v({b})',
+         0x0D: 'a_abs_v({w})', 0x0F: '{l}', 0x11: 'a_iny_({X},{b},{W})', 0x12: 'a_ind_v({b})',
          0x13: 'a_sry_v({b})', 0x15: 'a_dpx_v({b})', 0x17: 'a_ily_v({b})',
-         0x19: 'a_idx_v({w},w65.y,{W})', 0x1D: 'a_idx_v({w},w65.x,{W})', 0x1F: 'a_alx_v({l})'}
-SIMPLE = {0xA6: 'op_ldx(a_dp_v({b}))', 0xAE: 'op_ldx(a_abs_v({w}))', 0xA4: 'op_ldy(a_dp_v({b}))',
-          0xAC: 'op_ldy(a_abs_v({w}))', 0x86: 'op_stx(a_dp_v({b}))', 0x8E: 'op_stx(a_abs_v({w}))',
-          0x84: 'op_sty(a_dp_v({b}))', 0x8C: 'op_sty(a_abs_v({w}))', 0x64: 'op_stz(a_dp_v({b}))',
-          0x9C: 'op_stz(a_abs_v({w}))', 0xBD: None}
-SIMPLE.pop(0xBD)
+         0x19: 'a_idx_({X},{w},w65.y,{W})', 0x1D: 'a_idx_({X},{w},w65.x,{W})', 0x1F: 'a_alx_v({l})'}
+DP, AB, DX, DY = 'a_dp_v({b})', 'a_abs_v({w})', 'a_dpx_v({b})', 'a_dpy_v({b})'
+AXW, AXR, AYR = 'a_idx_({X},{w},w65.x,1)', 'a_idx_({X},{w},w65.x,0)', 'a_idx_({X},{w},w65.y,0)'
+SIMPLE = {0xA6: 'op_ldx_({X},%s)' % DP, 0xAE: 'op_ldx_({X},%s)' % AB, 0xB6: 'op_ldx_({X},%s)' % DY, 0xBE: 'op_ldx_({X},%s)' % AYR,
+          0xA4: 'op_ldy_({X},%s)' % DP, 0xAC: 'op_ldy_({X},%s)' % AB, 0xB4: 'op_ldy_({X},%s)' % DX, 0xBC: 'op_ldy_({X},%s)' % AXR,
+          0x86: 'op_stx_({X},%s)' % DP, 0x8E: 'op_stx_({X},%s)' % AB, 0x96: 'op_stx_({X},%s)' % DY,
+          0x84: 'op_sty_({X},%s)' % DP, 0x8C: 'op_sty_({X},%s)' % AB, 0x94: 'op_sty_({X},%s)' % DX,
+          0x64: 'op_stz_({M},%s)' % DP, 0x74: 'op_stz_({M},%s)' % DX, 0x9C: 'op_stz_({M},%s)' % AB, 0x9E: 'op_stz_({M},%s)' % AXW,
+          0xE4: 'op_cpx_({X},%s)' % DP, 0xEC: 'op_cpx_({X},%s)' % AB, 0xC4: 'op_cpy_({X},%s)' % DP, 0xCC: 'op_cpy_({X},%s)' % AB,
+          0x24: 'op_bit_({M},%s)' % DP, 0x2C: 'op_bit_({M},%s)' % AB, 0x34: 'op_bit_({M},%s)' % DX, 0x3C: 'op_bit_({M},%s)' % AXR,
+          0xD4: 'op_pei({b})', 0xF4: 'push16({w})'}
+for name, dp, ab, dx, ax, acc in (('ASL', 0x06, 0x0E, 0x16, 0x1E, 0x0A), ('LSR', 0x46, 0x4E, 0x56, 0x5E, 0x4A),
+                                  ('ROL', 0x26, 0x2E, 0x36, 0x3E, 0x2A), ('ROR', 0x66, 0x6E, 0x76, 0x7E, 0x6A),
+                                  ('INC', 0xE6, 0xEE, 0xF6, 0xFE, 0x1A), ('DEC', 0xC6, 0xCE, 0xD6, 0xDE, 0x3A)):
+    SIMPLE[dp] = 'rmw_({M},R_%s,%s)' % (name, DP)
+    SIMPLE[ab] = 'rmw_({M},R_%s,%s)' % (name, AB)
+    SIMPLE[dx] = 'rmw_({M},R_%s,%s)' % (name, DX)
+    SIMPLE[ax] = 'rmw_({M},R_%s,%s)' % (name, AXW)
+    SIMPLE[acc] = 'rmw_a_({M},R_%s)' % name
+SIMPLE.update({0x04: 'rmw_({M},R_TSB,%s)' % DP, 0x0C: 'rmw_({M},R_TSB,%s)' % AB,
+               0x14: 'rmw_({M},R_TRB,%s)' % DP, 0x1C: 'rmw_({M},R_TRB,%s)' % AB})
+IMPLIED = {0x48: 'op_pha_({M})', 0x68: 'op_pla_({M})', 0xDA: 'op_phx_({X})', 0xFA: 'op_plx_({X})', 0x5A: 'op_phy_({X})',
+           0x7A: 'op_ply_({X})', 0x08: 'op_php()', 0x8B: 'op_phb()', 0xAB: 'op_plb()', 0x0B: 'op_phd()', 0x2B: 'op_pld()',
+           0x4B: 'op_phk()', 0xAA: 'op_tax_({X})', 0xA8: 'op_tay_({X})', 0x8A: 'op_txa_({M})', 0x98: 'op_tya_({M})',
+           0x9B: 'op_txy_({X})', 0xBB: 'op_tyx_({X})', 0xBA: 'op_tsx_({X})', 0x9A: 'op_txs()', 0x5B: 'op_tcd()',
+           0x7B: 'op_tdc()', 0x1B: 'op_tcs()', 0x3B: 'op_tsc()', 0xEB: 'op_xba()', 0xE8: 'op_inx_({X})', 0xCA: 'op_dex_({X})',
+           0xC8: 'op_iny_({X})', 0x88: 'op_dey_({X})', 0x18: 'IDLE(); w65.p &= ~CF', 0x38: 'IDLE(); w65.p |= CF',
+           0x58: 'IDLE(); w65.p &= ~IF', 0x78: 'IDLE(); w65.p |= IF', 0xB8: 'IDLE(); w65.p &= ~VF',
+           0xD8: 'IDLE(); w65.p &= ~DF', 0xF8: 'IDLE(); w65.p |= DF', 0xEA: 'IDLE()'}
 BR = {0x10: '!(w65.p & NF)', 0x30: '(w65.p & NF)', 0x50: '!(w65.p & VF)', 0x70: '(w65.p & VF)',
       0x90: '!(w65.p & CF)', 0xB0: '(w65.p & CF)', 0xD0: '!(w65.p & ZF)', 0xF0: '(w65.p & ZF)'}
 # run through the interpreter core, and the block must end (PC or flags unknown)
-END = {0x00, 0x02, 0x28, 0x40, 0x44, 0x54, 0x60, 0x6B, 0x6C, 0x7C, 0xCB, 0xDB, 0xDC, 0xFB, 0xFC}
+END = {0x00, 0x02, 0x28, 0x40, 0x44, 0x54, 0xCB, 0xDB, 0xFB}
+# the target is only known at run time, so these end the block too
+RETURN = {0x60: 'F(1); op_rts();', 0x6B: 'F(1); op_rtl();'}
 STOP_PATH = {0x00, 0x02, 0xDB}
 
 
@@ -119,7 +144,7 @@ def decode(pc, mx):
     ops = [rb(((pc & 0xFF0000) | ((pc + i) & 0xFFFF))) for i in range(1, n)]
     if any(v is None for v in ops):
         return None
-    c = Ins(); c.pc, c.mx, c.op, c.n, c.targets, c.flow, c.mx_after = pc, mx, op, n, [], None, mx
+    c = Ins(); c.pc, c.mx, c.op, c.n, c.targets, c.flow, c.mx_after, c.tail, c.cond = pc, mx, op, n, [], None, mx, None, None
     bank = pc & 0xFF0000
     nxt = bank | ((pc + n) & 0xFFFF)
     c.next = nxt
@@ -128,50 +153,70 @@ def decode(pc, mx):
     l = '0x%06X' % (ops[0] | ops[1] << 8 | ops[2] << 16) if n > 3 else ''
     F = 'F(%d); ' % n
     low, high = op & 0x1F, op & 0xE0
+    M, X = 1 if mx & 2 else 0, 1 if mx & 1 else 0
     if op in BR or op == 0x80:
         t = bank | ((pc + 2 + s8(ops[0])) & 0xFFFF)
         c.targets = [(t, mx)]
+        c.tail = (t, mx)
         if op == 0x80:
-            c.c = F + 'IDLE(); w65.pc = 0x%04X;' % (t & 0xFFFF); c.flow = 'jump'
+            c.c = F + 'IDLE();'; c.flow = 'jump'
         else:
-            c.c = F + 'if (%s) { IDLE(); w65.pc = 0x%04X; } else w65.pc = 0x%04X;' % (BR[op], t & 0xFFFF, nxt & 0xFFFF)
-            c.flow = 'branch'
+            c.c = F; c.cond = BR[op]; c.flow = 'branch'
     elif op == 0x82:
         t = bank | ((pc + 3 + s16(ops[0] | ops[1] << 8)) & 0xFFFF)
-        c.targets = [(t, mx)]; c.flow = 'jump'
-        c.c = F + 'IDLE(); w65.pc = 0x%04X;' % (t & 0xFFFF)
+        c.targets = [(t, mx)]; c.flow = 'jump'; c.tail = (t, mx)
+        c.c = F + 'IDLE();'
     elif op == 0x4C:
         t = bank | (ops[0] | ops[1] << 8)
-        c.targets = [(t, mx)]; c.flow = 'jump'; c.c = F + 'w65.pc = %s;' % w
+        c.targets = [(t, mx)]; c.flow = 'jump'; c.tail = (t, mx); c.c = F.rstrip()
     elif op == 0x5C:
         t = ops[0] | ops[1] << 8 | ops[2] << 16
-        c.targets = [(t, mx)]; c.flow = 'jump'
-        c.c = F + 'w65.pc = 0x%04X; w65.pb = 0x%02X;' % (t & 0xFFFF, t >> 16)
+        c.targets = [(t, mx)]; c.flow = 'jump'; c.tail = (t, mx)
+        c.c = F + 'w65.pb = 0x%02X;' % (t >> 16)
     elif op == 0x20:
         t = bank | (ops[0] | ops[1] << 8)
-        c.targets = [(t, mx)]; c.flow = 'call'
-        c.c = F + 'IDLE(); push16(0x%04X); w65.pc = %s;' % ((pc + 2) & 0xFFFF, w)
+        c.targets = [(t, mx)]; c.flow = 'call'; c.tail = (t, mx)
+        c.c = F + 'IDLE(); push16(0x%04X);' % ((pc + 2) & 0xFFFF)
     elif op == 0x22:
         t = ops[0] | ops[1] << 8 | ops[2] << 16
-        c.targets = [(t, mx)]; c.flow = 'call'
-        c.c = F + 'push8(w65.pb); IDLE(); push16(0x%04X); w65.pc = 0x%04X; w65.pb = 0x%02X;' % ((pc + 3) & 0xFFFF, t & 0xFFFF, t >> 16)
+        c.targets = [(t, mx)]; c.flow = 'call'; c.tail = (t, mx)
+        c.c = F + 'push8(w65.pb); IDLE(); push16(0x%04X); w65.pb = 0x%02X;' % ((pc + 3) & 0xFFFF, t >> 16)
+    elif op in RETURN:
+        c.flow = 'end'; c.c = RETURN[op]
+    elif op == 0x6C:
+        c.flow = 'end'; c.c = F + 'w65.pc = rd16z(%s);' % w
+    elif op == 0xDC:
+        c.flow = 'end'; c.c = F + '{ u16 p = %s; w65.pc = rd16z(p); w65.pb = RD((u16)(p + 2)); }' % w
+    elif op == 0x7C:
+        c.flow = 'end'; c.c = F + 'IDLE(); w65.pc = rd16(0x%06X | (u16)(%s + w65.x));' % (bank, w)
+    elif op == 0xFC:
+        c.flow = 'end'
+        c.c = F + 'push16(0x%04X); IDLE(); w65.pc = rd16(0x%06X | (u16)(%s + w65.x));' % ((pc + 2) & 0xFFFF, bank, w)
     elif op in END:
         c.flow = 'end'
         c.c = 'w65.pc = 0x%04X; w65_exec();' % (pc & 0xFFFF)
     elif op in (0xC2, 0xE2):
         bits = (ops[0] >> 4) & 3          # P bit5=M, bit4=X -> mx bits 1,0
         c.mx_after = (mx & ~bits) if op == 0xC2 else (mx | bits)
-        c.c = 'w65.pc = 0x%04X; w65_exec();' % (pc & 0xFFFF)
+        c.c = F + '%s(%s);' % ('op_rep' if op == 0xC2 else 'op_sep', b)
     elif high in ALU and low in MODES:
         name = ALU[high]
-        ea = MODES[low].format(b=b, w=w, l=l, W=1 if name == 'sta' else 0)
-        c.c = F + 'op_%s(%s);' % (name, ea)
+        ea = MODES[low].format(b=b, w=w, l=l, W=1 if name == 'sta' else 0, X=X)
+        c.c = F + 'op_%s_(%d,%s);' % (name, M, ea)
     elif op in SIMPLE:
-        c.c = F + SIMPLE[op].format(b=b, w=w) + ';'
+        c.c = F + SIMPLE[op].format(b=b, w=w, M=M, X=X) + ';'
+    elif op in IMPLIED:
+        c.c = F + IMPLIED[op].format(M=M, X=X) + ';'
+    elif op == 0x62:
+        c.c = F + 'IDLE(); push16(0x%04X);' % ((pc + 3 + s16(ops[0] | ops[1] << 8)) & 0xFFFF)
+    elif op == 0x42:
+        c.c = F.rstrip()
+    elif op == 0x89:
+        c.c = F + ('op_bit_imm8(%s);' % b if M else 'op_bit_imm16(%s);' % w)
     elif op in (0x09, 0x29, 0x49, 0xA9, 0xC9, 0x69, 0xE9):
         nm = {0x09: 'ora', 0x29: 'and', 0x49: 'eor', 0xA9: 'lda', 0xC9: 'cmp', 0x69: 'adc', 0xE9: 'sbc'}[op]
         o = {'ora': '|', 'and': '&', 'eor': '^'}.get(nm)
-        if mx & 2:
+        if M:
             if nm == 'lda': c.c = F + '{ seta8(%s); nz8(%s); }' % (b, b)
             elif nm == 'cmp': c.c = F + 'cmp8((u8)w65.a, %s);' % b
             elif o: c.c = F + '{ u8 v = (u8)(w65.a %s %s); seta8(v); nz8(v); }' % (o, b)
@@ -182,17 +227,15 @@ def decode(pc, mx):
             elif o: c.c = F + '{ w65.a %s= %s; nz16(w65.a); }' % (o, w)
             else: c.c = F + '%s16(%s);' % (nm, w)
     elif op == 0xA2:
-        c.c = F + ('{ w65.x = %s; nz8((u8)w65.x); }' % b if mx & 1 else '{ w65.x = %s; nz16(w65.x); }' % w)
+        c.c = F + ('{ w65.x = %s; nz8((u8)w65.x); }' % b if X else '{ w65.x = %s; nz16(w65.x); }' % w)
     elif op == 0xA0:
-        c.c = F + ('{ w65.y = %s; nz8((u8)w65.y); }' % b if mx & 1 else '{ w65.y = %s; nz16(w65.y); }' % w)
+        c.c = F + ('{ w65.y = %s; nz8((u8)w65.y); }' % b if X else '{ w65.y = %s; nz16(w65.y); }' % w)
     elif op == 0xE0:
-        c.c = F + ('cmp8((u8)w65.x, %s);' % b if mx & 1 else 'cmp16(w65.x, %s);' % w)
+        c.c = F + ('cmp8((u8)w65.x, %s);' % b if X else 'cmp16(w65.x, %s);' % w)
     elif op == 0xC0:
-        c.c = F + ('cmp8((u8)w65.y, %s);' % b if mx & 1 else 'cmp16(w65.y, %s);' % w)
-    elif op == 0x18: c.c = 'F(1); IDLE(); w65.p &= ~CF;'
-    elif op == 0x38: c.c = 'F(1); IDLE(); w65.p |= CF;'
+        c.c = F + ('cmp8((u8)w65.y, %s);' % b if X else 'cmp16(w65.y, %s);' % w)
     else:
-        c.c = 'w65.pc = 0x%04X; w65_exec();' % (pc & 0xFFFF)   # shared interpreter core
+        sys.exit('no translation for opcode %02X at %06X' % (op, pc))
     return c
 
 
@@ -224,6 +267,17 @@ while work:
             starts.add((c.next, c.mx_after))
         pc, mx = c.next, c.mx_after
 
+# An entry from a coverage log may only be the place an interrupt happened to
+# return to. When the instruction before it simply runs into it, it needs no
+# block of its own: interrupts are taken between blocks, so they can't land there.
+falls_into = {(c.next, c.mx_after) for c in ins.values() if not c.flow}
+hard = set()
+for c in ins.values():
+    hard.update(t for t in c.targets)
+    if c.flow in ('branch', 'call'):
+        hard.add((c.next, c.mx_after))
+starts = hard | {e for e in entries if e not in falls_into}
+
 # --------------------------------------------------------------- emit
 blocks = []
 for s in sorted(starts):
@@ -242,35 +296,60 @@ for fn in os.listdir(outdir):
     if fn.startswith('recomp_'):
         os.remove(os.path.join(outdir, fn))
 HEAD = '''/* GENERATED by tools/recompile_65816.py - do not edit */
-#include "w65816_ops.h"
 #include "machine.h"
+#ifndef SNES_LOCKSTEP
+#define RD(a) snes_rd((a) & 0xFFFFFF)
+#define WR(a, v) snes_wr((a) & 0xFFFFFF, (u8)(v))
+#define IDLE() (snes_master += 6)
+#endif
+#define W65_NATIVE
+#include "w65816_ops.h"
 #define FAST(n) (snes_master += (n) * snes_rom_speed)
 #define SLOW(n) (snes_master += (n) * 8)
+#define GO(f) do { if (snes_master < snes_slice_end) f(); return; } while (0)
 '''
 CHUNK = 1500
+name = lambda k: '%s%06X_%d' % (prefix, k[0], k[1])
 nfiles = 0
 for fi in range(0, len(blocks), CHUNK):
+    part = blocks[fi:fi + CHUNK]
+    here = {b[0] for b in part}
+
+    def go(k):
+        """leave the block for k: straight there when it is in this file"""
+        t = 'w65.pc = 0x%04X;' % (k[0] & 0xFFFF)
+        return t + (' GO(%s);' % name(k) if k in here else ' return;')
+
     with open(os.path.join(outdir, 'recomp_%03d.c' % nfiles), 'w') as f:
         f.write(HEAD)
-        for (pc, mx), seq, end in blocks[fi:fi + CHUNK]:
+        for k, _, _ in part:
+            f.write('static void %s(void);\n' % name(k))
+        for (pc, mx), seq, end in part:
             f.write('#undef F\n#define F(n) %s(n)\n' % ('FAST' if pc & 0x800000 else 'SLOW'))
-            f.write('void %s%06X_%d(void) {\n' % (prefix, pc, mx))
-            for c in seq:
+            f.write('static void %s(void) {\n' % name((pc, mx)))
+            for c in seq[:-1]:
                 f.write('    %s  /* %06X op %02X */\n' % (c.c, c.pc, c.op))
-            if not seq[-1].flow:
-                f.write('    w65.pc = 0x%04X;\n' % (end[0] & 0xFFFF))
+            c = seq[-1]
+            f.write('    %s  /* %06X op %02X */\n' % (c.c, c.pc, c.op))
+            if c.flow == 'branch':
+                f.write('    if (%s) { IDLE(); %s }\n    %s\n' % (c.cond, go(c.tail), go((c.next, c.mx_after))))
+            elif c.flow in ('jump', 'call'):
+                f.write('    %s\n' % go(c.tail))
+            elif not c.flow:
+                f.write('    %s\n' % go(end))
             f.write('}\n')
+        f.write('static const SnesBlock table[] = {\n')
+        for k, _, _ in part:
+            f.write('    { 0x%06Xu, %d, %s },\n' % (k[0], k[1], name(k)))
+        f.write('};\nvoid %s_%d(void) { snes_recomp_add(table, sizeof table / sizeof table[0]); }\n' % (register_fn, nfiles))
     nfiles += 1
 with open(os.path.join(outdir, 'recomp_register.c'), 'w') as f:
     f.write('/* GENERATED by tools/recompile_65816.py - do not edit */\n#include "machine.h"\n')
-    for (pc, mx), _, _ in blocks:
-        f.write('void %s%06X_%d(void);\n' % (prefix, pc, mx))
-    # a table, not a call per block: the PowerPC TOC has no room for that many
-    f.write('\nstatic const struct { unsigned pc; int mx; void (*f)(void); } table[] = {\n')
-    for (pc, mx), _, _ in blocks:
-        f.write('    { 0x%06Xu, %d, %s%06X_%d },\n' % (pc, mx, prefix, pc, mx))
-    f.write('};\n\nvoid %s(void) {\n' % register_fn)
-    f.write('    for (unsigned i = 0; i < sizeof table / sizeof table[0]; i++) snes_recomp_add(table[i].pc, table[i].mx, table[i].f);\n')
+    for n in range(nfiles):
+        f.write('void %s_%d(void);\n' % (register_fn, n))
+    f.write('void %s(void) {\n' % register_fn)
+    for n in range(nfiles):
+        f.write('    %s_%d();\n' % (register_fn, n))
     f.write('}\n')
 if listing:
     with open(listing, 'w') as f:

@@ -37,7 +37,8 @@ EMU_STATE static u8  port_in[4], port_out[4];
 EMU_STATE static u8  tmr_target[3], tmr_stage[3], tmr_out[3];
 EMU_STATE static s32 tmr_div_slow, tmr_div_fast, dsp_div;
 /* clock conversion */
-EMU_STATE static s64 master_last, master_frac, cycle_budget;
+EMU_STATE static s32 master_last, cycle_budget;
+EMU_STATE static u32 master_frac;
 /* S-DSP */
 EMU_STATE static u8  dreg[128];
 EMU_STATE static Voice voice[8];
@@ -910,17 +911,28 @@ void snes_apu_write(int port, u8 v)
     port_in[port & 3] = v;
 }
 
-void snes_apu_run_to(s64 master)
+void snes_apu_rebase(s32 by)
 {
-    s64 delta = master - master_last;
+    master_last -= by;
+}
+
+void snes_apu_run_to(s32 master)
+{
+    s32 delta = (s32)((u32)master - (u32)master_last);
     /* A count that restarted (new game, master cleared) simply resyncs. */
     master_last = master;
     if (delta <= 0) return;
 
-    master_frac += delta * 1024000;
-    s64 cycles = master_frac / 21477272;
-    master_frac -= cycles * 21477272;
-    cycle_budget += cycles;
+    if (delta < 2000) master_frac += (u32)delta * 1024000u;   /* stays in 32 bits, which divide far faster */
+    else {
+        u64 f = (u64)master_frac + (u64)delta * 1024000u;
+        cycle_budget += (s32)(f / 21477272u);
+        f %= 21477272u;
+        master_frac = (u32)f;
+    }
+    u32 cycles = master_frac / 21477272u;
+    master_frac -= cycles * 21477272u;
+    cycle_budget += (s32)cycles;
 
     while (cycle_budget > 0) {
         int c = smp_halted ? 2 : smp_step();

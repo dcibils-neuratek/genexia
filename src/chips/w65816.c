@@ -147,8 +147,7 @@ void w65_exec(void) {
     case 0x24: op_bit(a_dp()); break; case 0x2C: op_bit(a_abs()); break;
     case 0x34: op_bit(a_dpx()); break; case 0x3C: op_bit(a_idx(w65.x, 0)); break;
     case 0x89:   /* immediate BIT only changes Z */
-        if (M8) { u8 v = fetch8(); w65.p = (u8)((w65.p & ~ZF) | ((v & w65.a & 0xFF) ? 0 : ZF)); }
-        else { u16 v = fetch16(); w65.p = (u8)((w65.p & ~ZF) | ((v & w65.a) ? 0 : ZF)); }
+        if (M8) op_bit_imm8(fetch8()); else op_bit_imm16(fetch16());
         break;
     /* X, Y load/store/compare */
     case 0xA2: if (X8) { w65.x = fetch8(); nz8((u8)w65.x); } else { w65.x = fetch16(); nz16(w65.x); } break;
@@ -185,8 +184,8 @@ void w65_exec(void) {
         u8 h = fetch8(); IDLE();
         w65.pc = rd16((u32)w65.pb << 16 | (u16)((h << 8 | l) + w65.x));
         break; }
-    case 0x60: IDLE(); IDLE(); w65.pc = (u16)(pop16() + 1); IDLE(); break;
-    case 0x6B: IDLE(); IDLE(); { u16 t = pop16(); w65.pb = pop8(); w65.pc = (u16)(t + 1); } break;
+    case 0x60: op_rts(); break;
+    case 0x6B: op_rtl(); break;
     case 0x40:
         IDLE(); IDLE();
         w65.p = pop8(); fix_p();
@@ -196,48 +195,48 @@ void w65_exec(void) {
     case 0x00: w65.pc++; interrupt(0xFFE6, 0xFFFE, 1); break;
     case 0x02: w65.pc++; interrupt(0xFFE4, 0xFFF4, 0); break;
     /* stack */
-    case 0x48: IDLE(); if (M8) push8((u8)w65.a); else push16(w65.a); break;
-    case 0x68: IDLE(); IDLE(); if (M8) { u8 v = pop8(); seta8(v); nz8(v); } else { w65.a = pop16(); nz16(w65.a); } break;
-    case 0xDA: IDLE(); if (X8) push8((u8)w65.x); else push16(w65.x); break;
-    case 0xFA: IDLE(); IDLE(); if (X8) { w65.x = pop8(); nz8((u8)w65.x); } else { w65.x = pop16(); nz16(w65.x); } break;
-    case 0x5A: IDLE(); if (X8) push8((u8)w65.y); else push16(w65.y); break;
-    case 0x7A: IDLE(); IDLE(); if (X8) { w65.y = pop8(); nz8((u8)w65.y); } else { w65.y = pop16(); nz16(w65.y); } break;
-    case 0x08: IDLE(); push8(w65.p); break;
+    case 0x48: op_pha_(M8); break;
+    case 0x68: op_pla_(M8); break;
+    case 0xDA: op_phx_(X8); break;
+    case 0xFA: op_plx_(X8); break;
+    case 0x5A: op_phy_(X8); break;
+    case 0x7A: op_ply_(X8); break;
+    case 0x08: op_php(); break;
     case 0x28: IDLE(); IDLE(); w65.p = pop8(); fix_p(); break;
-    case 0x8B: IDLE(); push8(w65.db); break;
-    case 0xAB: IDLE(); IDLE(); w65.db = pop8(); nz8(w65.db); break;
-    case 0x0B: IDLE(); push16(w65.d); break;
-    case 0x2B: IDLE(); IDLE(); w65.d = pop16(); nz16(w65.d); break;
-    case 0x4B: IDLE(); push8(w65.pb); break;
+    case 0x8B: op_phb(); break;
+    case 0xAB: op_plb(); break;
+    case 0x0B: op_phd(); break;
+    case 0x2B: op_pld(); break;
+    case 0x4B: op_phk(); break;
     case 0xF4: { u16 v = fetch16(); push16(v); break; }
-    case 0xD4: { u16 p = (u16)a_dp(); push16(rd16z(p)); break; }
+    case 0xD4: op_pei(fetch8()); break;
     case 0x62: { s16 o = (s16)fetch16(); IDLE(); push16((u16)(w65.pc + o)); break; }
     /* transfers */
-    case 0xAA: IDLE(); if (X8) { w65.x = w65.a & 0xFF; nz8((u8)w65.x); } else { w65.x = w65.a; nz16(w65.x); } break;
-    case 0xA8: IDLE(); if (X8) { w65.y = w65.a & 0xFF; nz8((u8)w65.y); } else { w65.y = w65.a; nz16(w65.y); } break;
-    case 0x8A: IDLE(); if (M8) { seta8((u8)w65.x); nz8((u8)w65.x); } else { w65.a = w65.x; nz16(w65.a); } break;
-    case 0x98: IDLE(); if (M8) { seta8((u8)w65.y); nz8((u8)w65.y); } else { w65.a = w65.y; nz16(w65.a); } break;
-    case 0x9B: IDLE(); w65.y = w65.x; if (X8) nz8((u8)w65.y); else nz16(w65.y); break;
-    case 0xBB: IDLE(); w65.x = w65.y; if (X8) nz8((u8)w65.x); else nz16(w65.x); break;
-    case 0xBA: IDLE(); if (X8) { w65.x = w65.s & 0xFF; nz8((u8)w65.x); } else { w65.x = w65.s; nz16(w65.x); } break;
-    case 0x9A: IDLE(); w65.s = w65.e ? (u16)(0x100 | (w65.x & 0xFF)) : w65.x; break;
-    case 0x5B: IDLE(); w65.d = w65.a; nz16(w65.d); break;
-    case 0x7B: IDLE(); w65.a = w65.d; nz16(w65.a); break;
-    case 0x1B: IDLE(); w65.s = w65.e ? (u16)(0x100 | (w65.a & 0xFF)) : w65.a; break;
-    case 0x3B: IDLE(); w65.a = w65.s; nz16(w65.a); break;
-    case 0xEB: IDLE(); IDLE(); w65.a = (u16)(w65.a >> 8 | w65.a << 8); nz8((u8)w65.a); break;
+    case 0xAA: op_tax_(X8); break;
+    case 0xA8: op_tay_(X8); break;
+    case 0x8A: op_txa_(M8); break;
+    case 0x98: op_tya_(M8); break;
+    case 0x9B: op_txy_(X8); break;
+    case 0xBB: op_tyx_(X8); break;
+    case 0xBA: op_tsx_(X8); break;
+    case 0x9A: op_txs(); break;
+    case 0x5B: op_tcd(); break;
+    case 0x7B: op_tdc(); break;
+    case 0x1B: op_tcs(); break;
+    case 0x3B: op_tsc(); break;
+    case 0xEB: op_xba(); break;
     /* index inc/dec */
-    case 0xE8: IDLE(); if (X8) { w65.x = (u8)(w65.x + 1); nz8((u8)w65.x); } else { w65.x++; nz16(w65.x); } break;
-    case 0xCA: IDLE(); if (X8) { w65.x = (u8)(w65.x - 1); nz8((u8)w65.x); } else { w65.x--; nz16(w65.x); } break;
-    case 0xC8: IDLE(); if (X8) { w65.y = (u8)(w65.y + 1); nz8((u8)w65.y); } else { w65.y++; nz16(w65.y); } break;
-    case 0x88: IDLE(); if (X8) { w65.y = (u8)(w65.y - 1); nz8((u8)w65.y); } else { w65.y--; nz16(w65.y); } break;
+    case 0xE8: op_inx_(X8); break;
+    case 0xCA: op_dex_(X8); break;
+    case 0xC8: op_iny_(X8); break;
+    case 0x88: op_dey_(X8); break;
     /* flags */
     case 0x18: IDLE(); w65.p &= ~CF; break; case 0x38: IDLE(); w65.p |= CF; break;
     case 0x58: IDLE(); w65.p &= ~IF; break; case 0x78: IDLE(); w65.p |= IF; break;
     case 0xB8: IDLE(); w65.p &= ~VF; break;
     case 0xD8: IDLE(); w65.p &= ~DF; break; case 0xF8: IDLE(); w65.p |= DF; break;
-    case 0xC2: { u8 v = fetch8(); IDLE(); w65.p &= (u8)~v; fix_p(); break; }
-    case 0xE2: { u8 v = fetch8(); IDLE(); w65.p |= v; fix_p(); break; }
+    case 0xC2: op_rep(fetch8()); break;
+    case 0xE2: op_sep(fetch8()); break;
     case 0xFB: {
         IDLE();
         u8 c = w65.p & CF;

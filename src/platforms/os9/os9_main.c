@@ -8,7 +8,7 @@
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit. On a
  * SNES those are Z = B, X = A, A = Y, S = X, C = L, D = R, Tab = Select.
  * F1 = scanlines (faster), F2 = full screen at the display's own size,
- * F3 = set up a gamepad with InputSprocket, F9 or F10 = options menu,
+ * F3 = set up a gamepad with InputSprocket, F8 = stats, F9 or F10 = options menu,
  * - and = = game speed, 0 = normal speed, or the bar: move the mouse to the
  * bottom of the picture and drag it.
  *
@@ -878,6 +878,15 @@ static void bar_draw(u32 *fb) {
     fx_text(fb, st, w, h, label, bx, by - 10, 1, 0xFFFFFF, 0xFFFFFF);
 }
 
+/* What is running and how fast, on top of the picture. F8. */
+static int stats_on;
+static char stats[3][40];
+static void stats_draw(u32 *fb) {
+    const int w = vdp_screen_w, h = vdp_screen_h;
+    fx_box(fb, VDP_FB_STRIDE, w, h, 4, 4, 4 + 190, 4 + 34, 0, 0.66f);
+    for (int i = 0; i < 3; i++) fx_text(fb, VDP_FB_STRIDE, w, h, stats[i], 8, 8 + i * 10, 1, 0xFFFFFF, 0xFFFFFF);
+}
+
 /* ------------------------------------------------------- game selector
  * Every Genesis ROM next to the application or in its roms folder. Recompiled
  * code only belongs to the exact ROM it was made from, so the header says
@@ -1164,6 +1173,7 @@ int main(void) {
             bar_mouse();
             if (dragged && !bar_drag) settings_save();
         }
+        if (press(0x64)) stats_on = !stats_on;
         if (press(0x65) | press(0x6D)) {
             menu_run();
             deadline = timebase();
@@ -1181,6 +1191,7 @@ int main(void) {
         ran++;
         if (behind) skipped++;
         else {
+            if (stats_on) stats_draw(vdp_framebuffer);    /* the next frame paints over it */
             if (TickCount() < bar_until) {
                 static u32 fb[VDP_FB_STRIDE * 240];
                 memcpy(fb, vdp_framebuffer, sizeof fb);
@@ -1221,6 +1232,16 @@ int main(void) {
                 else snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%  AltiVec lines %u", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p), vdp_altivec_lines);
                 vdp_altivec_lines = 0;
                 log_line(l);
+                {
+                    const u32 nat = snes_game ? snes_native_cycles : m68k_native_cycles, emu = snes_game ? snes_interp_cycles : m68k_interp_cycles;
+                    const u32 sum = nat / 100 + emu / 100 + 1;
+                    const int comp = (int)(nat / 100 * 100 / sum);
+                    snprintf(stats[0], sizeof stats[0], "FPS %d  GAME %d  SPEED %d%%", (int)(shown * 60 / ticks), (int)(ran * 60 / ticks), speed_pct);
+                    snprintf(stats[1], sizeof stats[1], "%s COMPILED %d%% EMULATED %d%%", snes_game ? "65816" : "68000", comp, 100 - comp);
+                    if (snes_game) snprintf(stats[2], sizeof stats[2], "CPU %d PPU %d APU %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)(t_ym / p), (int)(t_vid / p));
+                    else snprintf(stats[2], sizeof stats[2], "CPU %d VDP %d SND %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)((t_ym + t_z80) / p), (int)(t_vid / p));
+                    snes_native_cycles = snes_interp_cycles = m68k_native_cycles = m68k_interp_cycles = 0;
+                }
                 t_68k = t_z80 = t_vdp = t_ym = 0;
             }
             shown = ran = 0;

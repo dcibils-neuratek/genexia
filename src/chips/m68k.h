@@ -313,6 +313,7 @@ void recomp_register(void);            /* generated: fills the block table */
 void recomp_add(u32 pc, blockfn f);
 extern void (*m68k_register_game)(void);  /* set before reset; NULL = interpreter only */
 void recomp_register_umk3(void);
+extern u32 m68k_native_cycles, m68k_interp_cycles;   /* CPU time by where it ran */
 extern int m68k_force_interp;          /* 1 = never use recompiled blocks (reference mode) */
 
 #endif

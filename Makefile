@@ -94,6 +94,16 @@ SMK_ROM ?= roms/snes/Super Mario Kart (USA).sfc
 recompile-smk:
 	python3 tools/recompile_65816.py "$(SMK_ROM)" recomps/snes/smk --entries recomps/snes/smk/coverage.txt --listing docs/smk.lst --prefix S_ --register recomp_register_smk
 
+# dev: each recompiled block checked against the interpreter, see machine.c
+LS_SRC := src/backends/snes/machine.c $(wildcard recomps/snes/smk/recomp_*.c)
+LS_OBJ := $(patsubst %.c,$(BUILD)/ls/%.o,$(LS_SRC))
+LS_REST := $(filter-out $(BUILD)/backends/snes/machine.o $(BUILD)/gen/snes/%,$(OBJS))
+$(BUILD)/ls/%.o: %.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -std=gnu11 -w $(INCS) -DSNES_LOCKSTEP -c -o $@ $<
+smk-lockstep: $(LS_REST) $(LS_OBJ)
+	$(CC) -o genexia-lockstep $^ $(SDL_LD) -lm
+
 SM64_ROM ?= roms/n64/Super Mario 64 (USA).z64
 recompile-sm64:
 	python3 tools/recompile_mips.py "$(SM64_ROM)" recomps/n64/sm64 --entries recomps/n64/sm64/coverage.txt --prefix M_ --register recomp_register_sm64

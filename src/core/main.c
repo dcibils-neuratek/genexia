@@ -1226,9 +1226,12 @@ int main(int argc, char **argv) {
                 if (presses[i].frame <= f && f < presses[i].frame + 6) b[presses[i].player] |= presses[i].buttons;
             pad_state[0] = b[0];
             pad_state[1] = b[1];
-            if (getenv("SF2_HOLD")) {          /* dev: start,end,buttons held on P1 */
-                int h0, h1; char hb[16];
-                if (sscanf(getenv("SF2_HOLD"), "%d,%d,%15s", &h0, &h1, hb) == 3 && f >= h0 && f < h1) pad_state[0] |= parse_buttons(hb);
+            if (getenv("SF2_HOLD")) {          /* dev: start,end,buttons held on P1; several separated by ; */
+                int h0, h1, used; char hb[16];
+                for (const char *h = getenv("SF2_HOLD"); sscanf(h, "%d,%d,%15[^;]%n", &h0, &h1, hb, &used) == 3; h += used + (h[used] == ';')) {
+                    if (f >= h0 && f < h1) pad_state[0] |= parse_buttons(hb);
+                    if (!h[used]) break;
+                }
             }
             if (state_at && f == state_at && !st_buf && !st_pass) {   /* determinism check mid-game */
                 st_buf = malloc(state_size()); state_save(st_buf); st_monkey = monkey; st_mk = mk;

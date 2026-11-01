@@ -404,6 +404,13 @@ static void merge_layer(int li, int width, int mos)
     }
 
     if (width == 256) {
+        if (!main_win && !sub_win) {       /* the usual case: an empty pixel has z 0 and never wins */
+            if (main_on)
+                for (int x = 0; x < LW; x++) { u32 p = layer[x]; if (p >> 24 > above[x] >> 24) above[x] = p; }
+            if (sub_on)
+                for (int x = 0; x < LW; x++) { u32 p = layer[x]; if (p >> 24 > below[x] >> 24) below[x] = p; }
+            return;
+        }
         for (int x = 0; x < LW; x++) {
             u32 p = layer[x];
             if (!p) continue;
@@ -565,9 +572,11 @@ static void render_mode7(int n, int line, u32 z0, u32 z1)
     int direct = n == 0 && (P.cgwsel & 1);
     u32 src = (u32)n << 16;
 
-    for (int sx = -XO; sx < 256 + XO; sx++) {
-        int x = hflip ? 255 - sx : sx;
-        s32 px = (ox + a * x) >> 8, py = (oy + c * x) >> 8;
+    /* the position advances by a constant, no multiply per pixel */
+    int x0 = hflip ? 255 + XO : -XO;
+    s32 fx = ox + a * x0, fy = oy + c * x0, dx = hflip ? -a : a, dy = hflip ? -c : c;
+    for (int sx = -XO; sx < 256 + XO; sx++, fx += dx, fy += dy) {
+        s32 px = fx >> 8, py = fy >> 8;
         int outside = ((px | py) & ~1023) != 0;
         u32 t;
         if (outside && rep == 2) continue;

@@ -42,8 +42,10 @@ void snes_apu_reset(void);
 u8   snes_apu_read(int port);          /* CPU side of $2140-$2143 (port 0-3) */
 void snes_apu_write(int port, u8 v);
 /* Run the SPC700 and DSP so they catch up to the master clock count `master`
- * (a monotonic count of 21.477 MHz cycles). Samples accumulate internally. */
-void snes_apu_run_to(s64 master);
+ * (21.477 MHz cycles). Samples accumulate internally. The machine restarts the
+ * count every frame and reports how far back it went. */
+void snes_apu_run_to(s32 master);
+void snes_apu_rebase(s32 by);
 /* Drain up to `max` stereo frames (interleaved L,R) at SNES_DSP_RATE; returns frames copied. */
 int  snes_apu_take(s16 *out, int max);
 

@@ -14,14 +14,17 @@
 EMU_STATE static u8 wram[0x20000];
 EMU_STATE static u8 sram[0x20000];
 EMU_STATE static u32 wmadd;
-EMU_STATE s64 snes_master;
+EMU_STATE s32 snes_master;
+EMU_STATE s32 snes_slice_end;
 EMU_STATE int snes_rom_speed = 8;   /* master cycles per fast-ROM-area access */
-EMU_STATE static s64 line_start;
+EMU_STATE static s32 line_start;
 EMU_STATE static int cur_line;
-EMU_STATE static u8 nmitimen, memsel, wrmpya, rdio, mdr;
+EMU_STATE static u8 nmitimen, memsel, wrmpya, rdio;
+EMU_STATE u8 snes_mdr;
+#define mdr snes_mdr
 EMU_STATE static u16 wrdiv, rddiv, rdmpy, htime, vtime;
 EMU_STATE static u8 nmi_flag, irq_flag, in_vblank, joy_busy;
-EMU_STATE static s64 irq_at;
+EMU_STATE static s32 irq_at;
 EMU_STATE static u16 joy_auto[2];
 EMU_STATE static u8 joy_strobe;
 EMU_STATE static u16 joy_shift[2];
@@ -33,8 +36,6 @@ typedef struct {
 EMU_STATE static Chan ch[8];
 EMU_STATE static u8 hdmaen;
 
-static int hirom, has_dsp1;
-static u32 sram_mask;
 
 static const u8 dma_pat[8][4] = {
     {0,0,0,0},{0,1,0,1},{0,0,0,0},{0,0,1,1},{0,1,2,3},{0,1,0,1},{0,0,0,0},{0,0,1,1}
@@ -42,27 +43,46 @@ static const u8 dma_pat[8][4] = {
 static const u8 dma_len[8] = { 1, 2, 2, 4, 4, 4, 2, 4 };
 
 /* --------------------------------------------------- cartridge mapping */
+static int hirom, has_dsp1;
+static u32 sram_mask;
 static inline u32 rom_at(u32 i) {
     return rom[rom_size ? (i < rom_size ? i : i % rom_size) : 0];
+}
+const u8 *snes_rmap[4096];
+u8 *snes_wmap[4096];
+u8 snes_tmap[4096];
+
+/* ROM offset of a cartridge address, -1 for anything that isn't ROM */
+static s32 rom_index(u32 a) {
+    u32 bank = a >> 16, off = a & 0xFFFF, b = bank & 0x7F;
+    if (hirom) {
+        if (has_dsp1 && b < 0x20 && off >= 0x6000 && off < 0x8000) return -1;
+        if (b >= 0x20 && b < 0x40 && off >= 0x6000 && off < 0x8000 && sram_mask) return -1;
+        if ((bank >= 0x40 && bank < 0x7E) || bank >= 0xC0) return (s32)(a & 0x3FFFFF);
+        if (off >= 0x8000) return (s32)((b << 16 | off) & 0x3FFFFF);
+    } else {
+        if (has_dsp1 && b >= 0x30 && b < 0x40 && off >= 0x8000) return -1;
+        if (b >= 0x70 && b < 0x7E && off < 0x8000 && sram_mask) return -1;
+        if (off >= 0x8000 && !(bank >= 0x7E && bank < 0x80)) return (s32)(b << 15 | (off & 0x7FFF));
+    }
+    return -1;
 }
 
 /* returns 1 and sets *v for cartridge addresses */
 static int cart_read(u32 a, u8 *v) {
     u32 bank = a >> 16, off = a & 0xFFFF, b = bank & 0x7F;
+    s32 i = rom_index(a);
+    if (i >= 0) { *v = (u8)rom_at((u32)i); return 1; }
     if (hirom) {
         if (has_dsp1 && b < 0x20 && off >= 0x6000 && off < 0x8000) { *v = snes_dsp1_read(off >= 0x7000); return 1; }
         if (b >= 0x20 && b < 0x40 && off >= 0x6000 && off < 0x8000 && sram_mask) {
             *v = sram[(((b - 0x20) << 13) | (off - 0x6000)) & sram_mask]; return 1;
         }
-        if (bank >= 0x40 && bank < 0x7E) { *v = (u8)rom_at(a & 0x3FFFFF); return 1; }
-        if (bank >= 0xC0) { *v = (u8)rom_at(a & 0x3FFFFF); return 1; }
-        if (off >= 0x8000) { *v = (u8)rom_at((b << 16 | off) & 0x3FFFFF); return 1; }
     } else {
         if (has_dsp1 && b >= 0x30 && b < 0x40 && off >= 0x8000) { *v = snes_dsp1_read(off >= 0xC000); return 1; }
         if (b >= 0x70 && b < 0x7E && off < 0x8000 && sram_mask) {
             *v = sram[(((b - 0x70) << 15) | off) & sram_mask]; return 1;
         }
-        if (off >= 0x8000 && !(bank >= 0x7E && bank < 0x80)) { *v = (u8)rom_at(b << 15 | (off & 0x7FFF)); return 1; }
     }
     return 0;
 }
@@ -85,7 +105,7 @@ static int cart_write(u32 a, u8 v) {
 #ifdef GENEXIA_OS9
 u32 snes_t_ppu, snes_t_apu;
 static inline u32 now(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
-static void apu_catch_up(s64 m) { const u32 t = now(); snes_apu_run_to(m); snes_t_apu += now() - t; }
+static void apu_catch_up(s32 m) { const u32 t = now(); snes_apu_run_to(m); snes_t_apu += now() - t; }
 static void ppu_line(int line) { const u32 t = now(); snes_ppu_render_line(line); snes_t_ppu += now() - t; }
 #else
 #define apu_catch_up snes_apu_run_to
@@ -138,6 +158,7 @@ static void joy_auto_read(void) {
 }
 
 static void dma_run(u8 mask);
+static void memory_map(void);
 
 static u8 reg_read(u32 off) {
     switch (off) {
@@ -182,7 +203,7 @@ static void reg_write(u32 off, u8 v) {
     switch (off) {
     case 0x4016: if (joy_strobe && !(v & 1)) { joy_auto_read(); joy_shift[0] = joy_auto[0]; joy_shift[1] = joy_auto[1]; } joy_strobe = v & 1; return;
     case 0x4200:
-        if ((v & 0x80) && !(nmitimen & 0x80) && nmi_flag) w65.nmi_pending = 1;
+        if ((v & 0x80) && !(nmitimen & 0x80) && nmi_flag) { w65.nmi_pending = 1; snes_slice_end = 0; }
         nmitimen = v;
         if (!(v & 0x30)) { irq_flag = 0; w65.irq_line = 0; }
         return;
@@ -200,7 +221,7 @@ static void reg_write(u32 off, u8 v) {
     case 0x420A: vtime = (u16)((vtime & 0xFF) | (v & 1) << 8); return;
     case 0x420B: dma_run(v); return;
     case 0x420C: hdmaen = v; return;
-    case 0x420D: memsel = v; snes_rom_speed = (v & 1) ? 6 : 8; return;
+    case 0x420D: memsel = v; snes_rom_speed = (v & 1) ? 6 : 8; memory_map(); return;
     default: break;
     }
     if (off >= 0x4300 && off < 0x4380) {
@@ -256,9 +277,79 @@ static inline int access_time(u32 a) {
     return (bank & 0x80) && (memsel & 1) ? 6 : 8;
 }
 
-u8 w65_bus_read(u32 a) { snes_master += access_time(a); return mdr = bus_peek(a); }
-void w65_bus_write(u32 a, u8 v) { snes_master += access_time(a); mdr = v; bus_poke(a, v); }
+#ifdef SNES_LOCKSTEP
+/* Dev check, make smk-lockstep: every recompiled block runs, then the
+ * interpreter replays the same instructions. The second run sees the first
+ * one's bus trace instead of memory, so it must make the same accesses in the
+ * same order and end with the same registers and the same cycle count. */
+typedef struct { u32 a; u8 v, wr; s32 extra; } Trace;
+static Trace trace[4096];
+static int tr_n, tr_i, tr_mode, tr_bad, tr_err;
+static u8 tr_read(u32 a) {
+    if (tr_i < tr_n && !trace[tr_i].wr && trace[tr_i].a == a) { snes_master += access_time(a) + trace[tr_i].extra; return trace[tr_i++].v; }
+    if (snes_rmap[a >> 12] && !snes_wmap[a >> 12]) { snes_master += access_time(a); return snes_rmap[a >> 12][a & 0xFFF]; }   /* opcode fetch */
+    tr_bad = 1;
+    snes_master += access_time(a);
+    return 0;
+}
+static void tr_write(u32 a, u8 v) {
+    if (tr_i < tr_n && trace[tr_i].wr && trace[tr_i].a == a && trace[tr_i].v == v) { snes_master += access_time(a) + trace[tr_i].extra; tr_i++; return; }
+    tr_bad = 1;
+    snes_master += access_time(a);
+}
+#endif
+
+u8 w65_bus_read(u32 a) {
+#ifdef SNES_LOCKSTEP
+    if (tr_mode == 2) return tr_read(a);
+    if (tr_mode == 1) {
+        s32 m = snes_master + access_time(a);
+        u8 v = bus_peek(a); mdr = v; snes_master = m;
+        s32 extra = 0;
+        if (tr_n < 4096) trace[tr_n++] = (Trace){ a, v, 0, extra };
+        return v;
+    }
+#endif
+    const u8 *p = snes_rmap[a >> 12];
+    if (p) { snes_master += snes_tmap[a >> 12]; return mdr = p[a & 0xFFF]; }
+    snes_master += access_time(a);
+    return mdr = bus_peek(a);
+}
+void w65_bus_write(u32 a, u8 v) {
+#ifdef SNES_LOCKSTEP
+    if (tr_mode == 2) { tr_write(a, v); return; }
+    if (tr_mode == 1) {
+        s32 m = snes_master;
+        mdr = v; bus_poke(a, v);
+        s32 extra = snes_master - m;           /* DMA */
+        snes_master += access_time(a);
+        if (tr_n < 4096) trace[tr_n++] = (Trace){ a, v, 1, extra };
+        return;
+    }
+#endif
+    u8 *p = snes_wmap[a >> 12];
+    mdr = v;
+    if (p) { snes_master += snes_tmap[a >> 12]; p[a & 0xFFF] = v; return; }
+    snes_master += access_time(a);
+    bus_poke(a, v);
+}
 void w65_bus_idle(void) { snes_master += 6; }
+
+/* A page goes in the maps when all 4 KB of it are WRAM, or ROM that is
+ * contiguous there. Everything else takes the slow path through bus_peek(). */
+static void memory_map(void) {
+    for (u32 pg = 0; pg < 4096; pg++) {
+        u32 a = pg << 12, bank = a >> 16, off = a & 0xFFFF;
+        const u8 *r = NULL; u8 *w = NULL;
+        if (bank == 0x7E || bank == 0x7F) r = w = wram + (a & 0x1FFFF);
+        else if (!(bank & 0x40) && off < 0x2000) r = w = wram + off;
+        else {
+            s32 i = rom_index(a), j = rom_index(a + 0xFFF);
+            if (i >= 0 && j == i + 0xFFF && (u32)j < rom_size) r = rom + i;
+        }
+        snes_rmap[pg] = r; snes_wmap[pg] = w; snes_tmap[pg] = (u8)access_time(a);
+    }
+}
 
 /* ---------------------------------------------------------- general DMA */
 static void dma_run(u8 mask) {
@@ -344,12 +435,43 @@ void (*snes_register_game)(void);
 static FILE *miss_log;
 static u8 *miss_seen;
 u64 snes_blocks_run, snes_interp_run;
+u32 snes_native_cycles, snes_interp_cycles;
 
-void snes_recomp_add(u32 pc, int mx, w65fn f) {
-    u32 b = (pc >> 16) & 0xFF;
-    if (!block_bank[b]) block_bank[b] = calloc(0x40000, sizeof(w65fn));
-    block_bank[b][(pc & 0xFFFF) << 2 | (u32)mx] = f;
+void snes_recomp_add(const SnesBlock *t, unsigned n) {
+    for (unsigned i = 0; i < n; i++) {
+        u32 b = (t[i].pc >> 16) & 0xFF;
+        if (!block_bank[b]) block_bank[b] = calloc(0x40000, sizeof(w65fn));
+        block_bank[b][(t[i].pc & 0xFFFF) << 2 | (u32)t[i].mx] = t[i].f;
+    }
 }
+
+#ifdef SNES_LOCKSTEP
+static void run_block(w65fn f, u32 pc, int mx) {
+    W65816 before = w65;
+    s32 m0 = snes_master;
+    tr_n = tr_i = 0; tr_mode = 1; tr_bad = 0;
+    f();
+    W65816 after = w65;
+    s32 m1 = snes_master;
+    w65 = before; snes_master = m0; tr_mode = 2;
+    int guard = 0;
+    do w65_exec();
+    while (!(w65.pc == after.pc && w65.pb == after.pb && snes_master >= m1) && ++guard < 300);
+    tr_mode = 0;
+    int same = w65.a == after.a && w65.x == after.x && w65.y == after.y && w65.s == after.s && w65.d == after.d &&
+               w65.db == after.db && w65.p == after.p && w65.waiting == after.waiting && w65.stopped == after.stopped;
+    if (tr_bad || !same || tr_i != tr_n || snes_master != m1) {
+        if (tr_err++ < 30)
+            fprintf(stderr, "block %06X mx%d: bad %d regs %d trace %d/%d cycles %d/%d  A %04X/%04X X %04X/%04X Y %04X/%04X S %04X/%04X P %02X/%02X\n",
+                    pc, mx, tr_bad, same, tr_i, tr_n, m1 - m0, snes_master - m0, after.a, w65.a, after.x, w65.x, after.y, w65.y, after.s, w65.s, after.p, w65.p);
+    }
+    w65 = after; snes_master = m1;
+    { static u64 seen; if (++seen % 1000000 == 0) fprintf(stderr, "lockstep: %llu blocks, %d differ\n", (unsigned long long)seen, tr_err); }
+}
+#define CALL_BLOCK(f, pc, mx) run_block(f, pc, mx)
+#else
+#define CALL_BLOCK(f, pc, mx) f()
+#endif
 
 static inline void cpu_slice(void) {
     static u32 next_pc = 0xFFFFFFFF;
@@ -358,7 +480,14 @@ static inline void cpu_slice(void) {
         int mx = (w65.p >> 4) & 3;
         w65fn *t = snes_force_interp ? NULL : block_bank[w65.pb];
         w65fn f = t ? t[(pc & 0xFFFF) << 2 | (u32)mx] : NULL;
-        if (f) { f(); snes_blocks_run++; next_pc = 0xFFFFFFFF; return; }
+        if (f) {
+            const s32 m = snes_master;
+            CALL_BLOCK(f, pc, mx);
+            snes_blocks_run++;
+            snes_native_cycles += (u32)(snes_master - m);
+            next_pc = 0xFFFFFFFF;
+            return;
+        }
         if (miss_log && pc != next_pc && ((w65.pc >= 0x8000 && w65.pb < 0x7E) || w65.pb >= 0x80 || (w65.pb >= 0x40 && w65.pb < 0x7E))) {
             u32 k = pc << 2 | (u32)mx;
             if (!(miss_seen[k >> 3] & (1 << (k & 7)))) {
@@ -367,23 +496,27 @@ static inline void cpu_slice(void) {
             }
         }
         u32 before = pc;
+        const s32 m = snes_master;
         w65_step();
+        snes_interp_cycles += (u32)(snes_master - m);
         snes_interp_run++;
         u32 after = (u32)w65.pb << 16 | w65.pc;
         next_pc = (after > before && after - before <= 4) ? after : 0xFFFFFFFF;
         return;
     }
+    const s32 m = snes_master;
     w65_step();
+    snes_interp_cycles += (u32)(snes_master - m);
     next_pc = 0xFFFFFFFF;
 }
 
 void snes_run_frame(void) {
     int vis = snes_ppu_overscan() ? 239 : 224;
-    s64 base = snes_master;
+    s32 base = snes_master;
     for (int line = 0; line < SNES_LINES_PER_FRAME; line++) {
         cur_line = line;
         line_start = base;
-        s64 line_end = base + SNES_MASTER_PER_LINE;
+        s32 line_end = base + SNES_MASTER_PER_LINE;
         if (line == 0) {
             in_vblank = 0; nmi_flag = 0;
             snes_ppu_frame_start();
@@ -400,12 +533,19 @@ void snes_run_frame(void) {
         line_irq_setup(line);
         while (snes_master < line_end) {
             if (irq_at >= 0 && snes_master >= irq_at) { irq_flag = 1; w65.irq_line = 1; irq_at = -1; }
+            snes_slice_end = irq_at >= 0 && irq_at < line_end ? irq_at : line_end;
+#ifdef SNES_LOCKSTEP
+            snes_slice_end = 0;
+#endif
             cpu_slice();
         }
         base = line_end;
         apu_catch_up(snes_master);
     }
     (void)update_hdma_nothing;
+    /* only the distance between two counts matters, so start each frame near 0 */
+    snes_master -= base;
+    snes_apu_rebase(base);
 }
 
 /* ----------------------------------------------------------- start-up */
@@ -459,6 +599,7 @@ void snes_reset(void) {
     snes_ppu_reset();
     snes_apu_reset();
     snes_dsp1_reset();
+    memory_map();
     w65_reset();
 }
 
