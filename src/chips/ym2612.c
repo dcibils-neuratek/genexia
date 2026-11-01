@@ -282,6 +282,14 @@ static inline u32 phase_inc(const Op *o, u16 fnum, u8 blk, int pms, int lfo_pm)
 }
 
 /* ------------------------------------------------------------ channel */
+/* The classic Mac plays 22 kHz, so the voices are worked out every other
+ * sample: there is nothing above that to hear, and they cost the most here.
+ * Envelopes, timers and the LFO still run at the chip's own rate. */
+#ifdef GENEXIA_OS9
+#define YM_SYNTH_SHIFT 1
+#else
+#define YM_SYNTH_SHIFT 0
+#endif
 static int chan_calc(int c, int am_lfo, int pm_lfo)
 {
     Chan *ch = &ym.ch[c];
@@ -295,7 +303,7 @@ static int chan_calc(int c, int am_lfo, int pm_lfo)
         op_freq(c, o, &f, &b);
         vol[o] = op_vol(op, am);
         ph[o] = op->phase;
-        op->phase = (op->phase + phase_inc(op, f, b, pms, pm_lfo)) & 0xfffff;
+        op->phase = (op->phase + (phase_inc(op, f, b, pms, pm_lfo) << YM_SYNTH_SHIFT)) & 0xfffff;
     }
 
     int fbmod = ch->fb ? (ch->fb1 + ch->fb2) >> (10 - ch->fb) : 0;
@@ -532,18 +540,22 @@ void ym2612_render(s16 *out, int n)
                 }
         }
         for (int c = 0; c < 6; c++)
-            for (int o = 0; o < 4; o++) ssg_update(&ym.ch[c].op[o]);
+            for (int o = 0; o < 4; o++) if (ym.ch[c].op[o].ssg & 8) ssg_update(&ym.ch[c].op[o]);
 
+#if YM_SYNTH_SHIFT
+        static s16 held[2];
+        if (i & 1) { out[2 * i] = held[0]; out[2 * i + 1] = held[1]; continue; }
+#endif
         int l = 0, r = 0;
         for (int c = 0; c < 6; c++) {
             Chan *chp = &ym.ch[c];
-            int v;
-            /* fully released channel: output is silence and key-on resets the
+            int v = 0;
+            /* the DAC replaces the sixth voice, and fully released channel: output is silence and key-on resets the
              * phase, so skipping the synthesis changes nothing audible */
             if (chp->op[0].state == EG_OFF && chp->op[1].state == EG_OFF &&
                 chp->op[2].state == EG_OFF && chp->op[3].state == EG_OFF) {
-                v = 0; chp->fb1 = chp->fb2 = 0;
-            } else v = chan_calc(c, am_lfo, pm_lfo);
+                chp->fb1 = chp->fb2 = 0;
+            } else if (c != 5 || !ym.dac_en) v = chan_calc(c, am_lfo, pm_lfo);
             if (c == 5 && ym.dac_en) v = ((int)ym.dac - 128) << 6;
             v >>= 5;                      /* 9-bit DAC */
             if (ym.ch[c].left) l += v;
@@ -557,5 +569,8 @@ void ym2612_render(s16 *out, int n)
         if (r < -32768) r = -32768;
         out[2 * i] = (s16)l;
         out[2 * i + 1] = (s16)r;
+#if YM_SYNTH_SHIFT
+        held[0] = (s16)l; held[1] = (s16)r;
+#endif
     }
 }

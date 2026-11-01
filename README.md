@@ -354,8 +354,9 @@ is much slower on these machines.
 
 Keys are arrows, Z X C, A S D, Return for Start and Esc to quit. F9 or F10 opens the
 options menu: full screen, widescreen, Scale2x, scanlines, Vivid colour, picture
-shape and the sprite limit. Settings are kept in `genexia.cfg`. Run-ahead, save
-states and game speed aren't available here. F1 toggles scanlines, which is also faster. F2 is full
+shape, the sprite limit and game speed. Settings are kept in `genexia.cfg`. Move the
+mouse to the bottom of the picture for the speed bar and drag it, or use - and = (0 for
+normal). Run-ahead and save states aren't available here. F1 toggles scanlines, which is also faster. F2 is full
 screen at the display's own size, at 16 bits through DrawSprocket, with the picture
 scaled to fill a 4:3 screen, or letterboxed in widescreen. F3 sets up a gamepad
 through InputSprocket. Both are loaded from the system at run time.

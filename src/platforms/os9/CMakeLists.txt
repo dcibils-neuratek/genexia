@@ -11,11 +11,16 @@ add_application(Genexia
     genexia.r
     ${ROOT}/src/chips/m68k_core.c ${ROOT}/src/chips/m68k_interp.c ${ROOT}/src/chips/z80.c
     ${ROOT}/src/chips/ym2612.c ${ROOT}/src/chips/psg.c
-    ${ROOT}/src/backends/genesis/bus.c ${ROOT}/src/backends/genesis/vdp.c
+    ${ROOT}/src/backends/genesis/bus.c ${ROOT}/src/backends/genesis/vdp.c ${ROOT}/src/backends/genesis/vdp_altivec.c
     ${ROOT}/src/backends/genesis/fx.c ${ROOT}/src/backends/genesis/combo.c ${ROOT}/src/core/enhance.c
     ${RECOMP})
 
 target_compile_definitions(Genexia PRIVATE GENEXIA_OS9)
 target_include_directories(Genexia PRIVATE ${ROOT}/build ${ROOT}/src ${ROOT}/src/core ${ROOT}/src/chips ${ROOT}/src/backends/genesis)
 target_compile_options(Genexia PRIVATE -std=gnu11 -O2 -w -mminimal-toc -mcpu=750 -mtune=7450 -fno-strict-aliasing)
+# the rest also runs on a G3. The compiler doesn't tell the assembler about the
+# G4 on this target, so that needs saying.
+set_source_files_properties(${ROOT}/src/backends/genesis/vdp_altivec.c PROPERTIES
+    COMPILE_OPTIONS "-mcpu=7450;-maltivec;-mabi=altivec;-mvrsave;-Wa,-m7450")
+set_source_files_properties(${ROOT}/src/backends/genesis/vdp.c ${ROOT}/src/chips/ym2612.c PROPERTIES COMPILE_OPTIONS "-O3")
 target_link_libraries(Genexia -lm)

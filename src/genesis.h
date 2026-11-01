@@ -67,6 +67,11 @@ extern int vdp_screen_w, vdp_screen_h;  /* output size incl. widescreen margins 
  * extending planes and sprites into stage graphics that exist beyond the
  * game's view (TV-correct 16:9). Margins without stage data become black. */
 extern int vdp_widescreen;
+#ifdef GENEXIA_OS9
+extern int vdp_altivec;                 /* the machine has it: see vdp_altivec.c */
+extern unsigned vdp_altivec_lines;
+void vdp_compose_altivec(u8 *out, const u8 *A, const u8 *B, const u8 *S, int n);
+#endif
 extern int vdp_native_w;                /* 256 or 320: the game's own view width */
 extern int vdp_view_x;                  /* where game x=0 lands in the output line */
 extern int vdp_no_sprite_limit;

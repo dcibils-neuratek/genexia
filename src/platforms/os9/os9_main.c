@@ -7,7 +7,9 @@
  *
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
  * F1 = scanlines (faster), F2 = full screen at the display's own size,
- * F3 = set up a gamepad with InputSprocket, F9 or F10 = options menu.
+ * F3 = set up a gamepad with InputSprocket, F9 or F10 = options menu,
+ * - and = = game speed, 0 = normal speed, or the bar: move the mouse to the
+ * bottom of the picture and drag it.
  *
  * DrawSprocket and InputSprocket are found at run time, so the game still runs
  * without them.
@@ -46,7 +48,14 @@ static s64 aud_cyc;
 static s16 ring[RING * 2];
 static volatile u32 ring_w, ring_r;
 static u32 rs_pos;                   /* 16.16 position in the native samples */
-static const u32 rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) / OUT_RATE);
+static u32 rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) / OUT_RATE);
+/* game speed in percent: sound follows it, like a tape running faster */
+static int speed_pct = 100;
+static void set_speed(int pct) {
+    pct = (pct + 2) / 5 * 5;
+    speed_pct = pct < 50 ? 50 : pct > 200 ? 200 : pct;
+    rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) * speed_pct / 100 / OUT_RATE);
+}
 
 static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
 static u32 t_vdp, t_68k, t_z80, t_ym;     /* where a frame goes, for the log */
@@ -202,7 +211,8 @@ static CGrafPtr dsp_port;            /* the screen, while DrawSprocket owns it *
 static u32 last_frame[SRC_H][SRC_W];
 static int last_valid;
 static u8 *last_line;
-static u16 x_rep[SRC_W];             /* screen pixels for each picture column */
+static u16 x_src[OUT_W + 1];          /* picture column under each screen pixel */
+static u16 x_at[SRC_W + 1];          /* first screen pixel of each picture column */
 static short y_at[SRC_H + 1];        /* first screen line of each picture line */
 static int map_sw, map_sh, map_dw, map_dh;
 static void clear_screen(void);
@@ -220,7 +230,8 @@ static void layout(int sw, int sh, int an, int ad) {
     }
     if (sw == map_sw && sh == map_sh && dw == map_dw && dh == map_dh) return;
     map_sw = sw; map_sh = sh; map_dw = dw; map_dh = dh;
-    for (int i = 0; i < sw; i++) x_rep[i] = (u16)((i + 1) * dw / sw - i * dw / sw);
+    for (int i = 0; i <= sw; i++) x_at[i] = (u16)(i * dw / sw);
+    for (int i = 0; i < sw; i++) for (int x = x_at[i]; x < x_at[i + 1]; x++) x_src[x] = (u16)i;
     for (int i = 0; i <= sh; i++) y_at[i] = (short)(i * dh / sh);
     last_valid = 0;
 }
@@ -233,37 +244,48 @@ static void blit(u8 *top, int row, int depth, const u32 *src, int stride, int sw
     static union { double d[OUT_W / 2 + 2]; u32 w[OUT_W + 4]; u16 h[OUT_W * 2 + 8]; } buf;
     if (top != last_line) last_valid = 0;
     last_line = top;
-    const int bytes = map_dw * (depth / 8), aligned = !((size_t)top & 3) && !(row & 7);
+    const int aligned = !((size_t)top & 3) && !(row & 7), px = depth / 8;
     for (int y = 0; y < sh; y++, src += stride) {
-        if (last_valid && !memcmp(last_frame[y], src, (size_t)sw * 4)) continue;
-        memcpy(last_frame[y], src, (size_t)sw * 4);
+        /* only the part of the line that changed */
+        int from_x = 0, to_x = sw;
+        if (last_valid) {
+            const u32 *old = last_frame[y];
+            while (from_x < sw && old[from_x] == src[from_x]) from_x++;
+            if (from_x == sw) continue;
+            while (old[to_x - 1] == src[to_x - 1]) to_x--;
+        }
+        memcpy(last_frame[y] + from_x, src + from_x, (size_t)(to_x - from_x) * 4);
         u8 *line = top + (size_t)y_at[y] * row;
-        const int skew = aligned ? (int)((size_t)line & 7) / 4 : 0;
+        const int skew = aligned ? (int)((size_t)line & 7) : 0;
+        /* buffer offsets, on 8-byte boundaries of the screen */
+        int first = aligned ? (skew + x_at[from_x] * px) & ~7 : skew, end = aligned ? (skew + x_at[to_x] * px + 7) & ~7 : skew + map_dw * px;
+        if (first < skew) first = skew;
+        if (end > skew + map_dw * px) end = skew + map_dw * px;
+        const int d0 = (first - skew) / px, d1 = (end - skew) / px;
         if (depth == 32) {
-            u32 *p = buf.w + skew;
-            for (int x = 0; x < sw; x++) {
-                const u32 c = src[x];
-                for (int n = x_rep[x]; n; n--) *p++ = c;
-            }
+            u32 *p = buf.w + (first >> 2);
+            for (int x = d0; x < d1; x++) *p++ = src[x_src[x]];
         } else {
-            u16 *p = buf.h + skew * 2;
-            for (int x = 0; x < sw; x++) {
+            static u16 conv[SRC_W];
+            const int s0 = x_src[d0], s1 = x_src[d1 - 1];
+            for (int x = s0; x <= s1; x++) {
                 const u32 c = src[x];
-                const u16 q = (u16)((c >> 9 & 0x7C00) | (c >> 6 & 0x3E0) | (c >> 3 & 0x1F));
-                for (int n = x_rep[x]; n; n--) *p++ = q;
+                conv[x] = (u16)((c >> 9 & 0x7C00) | (c >> 6 & 0x3E0) | (c >> 3 & 0x1F));
             }
+            u16 *p = buf.h + (first >> 1);
+            for (int x = d0; x < d1; x++) *p++ = conv[x_src[x]];
         }
         int reps = y_at[y + 1] - y_at[y];
         if (every_other && reps > 1) reps--;
         for (int rep = 0; rep < reps; rep++) {
-            volatile u8 *d = line + (size_t)rep * row;
-            const u8 *from = (const u8 *)buf.w + skew * 4;
-            int left = bytes;
+            volatile u8 *d = line + (size_t)rep * row + (first - skew);
+            const u8 *from = (const u8 *)buf.w + first;
+            int left = end - first;
             if (!aligned) {              /* 16-bit picture on an odd pixel */
                 for (int i = 0; i < left; i += 2) *(volatile u16 *)(d + i) = *(const u16 *)(from + i);
                 continue;
             }
-            if (skew) { *(volatile u32 *)d = *(const u32 *)from; d += 4; from += 4; left -= 4; }
+            if (first & 7) { *(volatile u32 *)d = *(const u32 *)from; d += 4; from += 4; left -= 4; }
             for (; left >= 8; left -= 8, d += 8, from += 8) *(volatile double *)d = *(const double *)from;
             if (left >= 4) *(volatile u32 *)d = *(const u32 *)from;
         }
@@ -702,22 +724,23 @@ static int settings_get(const char *key, int def) {
 static void settings_save(void) {
     FILE *f = fopen(SETTINGS, "w");
     if (!f) return;
-    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\n", vdp_widescreen, enh_upscale, every_other,
-            enh_color, enh_shape, vdp_no_sprite_limit);
+    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\nspeed %d\n", vdp_widescreen, enh_upscale, every_other,
+            enh_color, enh_shape, vdp_no_sprite_limit, speed_pct);
     fclose(f);
 }
 
 /* ---------------------------------------------------------- options menu */
-enum { M_FULL, M_ENHANCE, M_CLOSE, M_WIDE, M_UPSCALE, M_FILTER, M_COLOR, M_SHAPE, M_LIMIT, M_BACK, M_COUNT };
+enum { M_FULL, M_SPEED, M_ENHANCE, M_CLOSE, M_WIDE, M_UPSCALE, M_FILTER, M_COLOR, M_SHAPE, M_LIMIT, M_BACK, M_COUNT };
 static const int menu_pages[2][8] = {
-    { M_FULL, M_ENHANCE, M_CLOSE, -1 },
+    { M_FULL, M_SPEED, M_ENHANCE, M_CLOSE, -1 },
     { M_WIDE, M_UPSCALE, M_FILTER, M_COLOR, M_SHAPE, M_LIMIT, M_BACK, -1 },
 };
-static const char *const menu_names[M_COUNT] = { "Full screen", "Enhancements", "Close", "Widescreen", "Pixel art upscaler",
+static const char *const menu_names[M_COUNT] = { "Full screen", "Game speed", "Enhancements", "Close", "Widescreen", "Pixel art upscaler",
                                                  "Video filter", "Colour", "Picture shape", "Sprite limit", "Back" };
 static const char *menu_value(int i) {
     switch (i) {
     case M_FULL:    return dsp_port || full_screen ? "On" : "Off";
+    case M_SPEED: { static char b[8]; snprintf(b, sizeof b, "%d%%", speed_pct); return b; }
     case M_ENHANCE: return ">";
     case M_WIDE:    return vdp_widescreen ? "16:9" : "Off";
     case M_UPSCALE: return enh_upscale ? "Scale2x" : "Off";
@@ -728,9 +751,10 @@ static const char *menu_value(int i) {
     default:        return "";
     }
 }
-static void menu_change(int i) {
+static void menu_change(int i, int dir) {
     switch (i) {
     case M_FULL:    toggle_full(); break;
+    case M_SPEED:   set_speed(speed_pct + dir * 10); break;
     case M_WIDE:    vdp_widescreen = !vdp_widescreen; break;
     case M_UPSCALE: enh_upscale = !enh_upscale; break;
     case M_FILTER:  every_other = !every_other; clear_screen(); break;
@@ -778,12 +802,13 @@ static void menu_run(void) {
         const int item = menu_pages[page][sel];
         if (press(0x7E)) sel = (sel + count - 1) % count;
         if (press(0x7D)) sel = (sel + 1) % count;
-        if (press(0x7B) | press(0x7C)) menu_change(item);
+        if (press(0x7B)) menu_change(item, -1);
+        if (press(0x7C)) menu_change(item, 1);
         if (press(0x24)) {
             if (item == M_CLOSE) open = 0;
             else if (item == M_ENHANCE) { page = 1; sel = 0; }
             else if (item == M_BACK) { page = 0; sel = 0; }
-            else menu_change(item);
+            else menu_change(item, 1);
         }
         if (press(0x35)) { if (page) { page = 0; sel = 0; } else open = 0; }
         if (press(0x65) | press(0x6D)) open = 0;
@@ -797,6 +822,44 @@ static void menu_run(void) {
         while (TickCount() < until) { }
     }
     settings_save();
+}
+
+/* ---------------------------------------------------------- speed bar
+ * Like the modern app's: it shows when the mouse nears the bottom of the
+ * picture or the speed changes, and dragging it sets the speed. */
+static unsigned long bar_until;
+static int bar_drag;
+static void bar_show(void) { bar_until = TickCount() + 150; }
+
+static void bar_mouse(void) {
+    const int w = vdp_screen_w, h = vdp_screen_h;
+    Point at = LMGetMouseLocation(), o = { pic.top, pic.left };
+    if (!dsp_port) { SetPort((GrafPtr)win); LocalToGlobal(&o); }
+    if (!map_dw || !map_dh) return;
+    const int x = (at.h - o.h) * w / map_dw, y = (at.v - o.v) * h / map_dh;
+    const int bx = w / 4, bw = w / 2, by = h - h / 10;
+    if (y > h - h / 5 && y < h && x >= 0 && x < w) bar_show();
+    const int down = Button();
+    if (!down) bar_drag = 0;
+    else if (TickCount() < bar_until && x >= bx - 8 && x <= bx + bw + 8 && y >= by - 10 && y <= by + 12) bar_drag = 1;
+    if (bar_drag) {
+        const int t = x < bx ? 0 : x > bx + bw ? bw : x - bx;
+        set_speed(50 + t * 150 / bw);
+        bar_show();
+    }
+}
+
+static void bar_draw(u32 *fb) {
+    const int w = vdp_screen_w, h = vdp_screen_h, st = VDP_FB_STRIDE;
+    const int bx = w / 4, bw = w / 2, by = h - h / 10, pos = bw * (speed_pct - 50) / 150;
+    char label[16];
+    fx_box(fb, st, w, h, bx - 6, by - 12, bx + bw + 6, by + 8, 0, 0.66f);
+    fx_box(fb, st, w, h, bx, by, bx + bw, by + 4, 0x5A5A6E, 1.0f);
+    fx_box(fb, st, w, h, bx, by, bx + pos, by + 4, 0xFFC828, 1.0f);
+    fx_box(fb, st, w, h, bx + bw / 3, by - 2, bx + bw / 3 + 1, by + 6, 0xFFFFFF, 0.8f);
+    fx_box(fb, st, w, h, bx + pos - 1, by - 2, bx + pos + 2, by + 6, 0xFFFFFF, 1.0f);
+    snprintf(label, sizeof label, "SPEED %d%%", speed_pct);
+    fx_text(fb, st, w, h, label, bx, by - 10, 1, 0xFFFFFF, 0xFFFFFF);
 }
 
 /* ------------------------------------------------------- game selector
@@ -970,12 +1033,16 @@ int main(void) {
     dsp_open();
     usb_open();
     usb_scan();
+    long cpu_features = 0;
+    vdp_altivec = Gestalt('ppcf', &cpu_features) == noErr && (cpu_features >> 4 & 1);
+    log_line(vdp_altivec ? "AltiVec: on" : "AltiVec: off");
     vdp_widescreen = settings_get("wide", 0);
     enh_upscale = settings_get("upscale", 0);
     every_other = settings_get("scanlines", 0);
     enh_color = settings_get("color", 0);
     enh_shape = settings_get("shape", 1);
     vdp_no_sprite_limit = settings_get("limit", 1);
+    set_speed(settings_get("speed", 100));
 
     const Game *game = game_select();
     if (game) {
@@ -1031,6 +1098,14 @@ int main(void) {
             black_window();
             deadline = timebase();
         }
+        if (press(0x1B)) { set_speed(speed_pct - 10); bar_show(); settings_save(); }
+        if (press(0x18)) { set_speed(speed_pct + 10); bar_show(); settings_save(); }
+        if (press(0x1D)) { set_speed(100); bar_show(); settings_save(); }
+        {
+            const int dragged = bar_drag;
+            bar_mouse();
+            if (dragged && !bar_drag) settings_save();
+        }
         if (press(0x65) | press(0x6D)) {
             menu_run();
             deadline = timebase();
@@ -1039,25 +1114,36 @@ int main(void) {
         /* more than a frame late: run the game but don't draw */
         const u32 t0 = timebase();
         t_other += t0 - t_pumped;
-        const int behind = (s32)(t0 - deadline) > (s32)frame_tb && skipped < 3;
+        const u32 period = (u32)((u64)frame_tb * 100 / (u32)speed_pct);
+        const int behind = (s32)(t0 - deadline) > (s32)period && skipped < 3;
         vdp_skip_render = behind;
         run_frame();
         const u32 t1 = timebase();
         t_emu += t1 - t0;
         ran++;
         if (behind) skipped++;
-        else { show_frame(vdp_framebuffer); t_vid += timebase() - t1; shown++; skipped = 0; }
+        else {
+            if (TickCount() < bar_until) {
+                static u32 fb[VDP_FB_STRIDE * 240];
+                memcpy(fb, vdp_framebuffer, sizeof fb);
+                bar_draw(fb);
+                show_frame(fb);
+            } else show_frame(vdp_framebuffer);
+            t_vid += timebase() - t1;
+            shown++;
+            skipped = 0;
+        }
 
         /* The Sound Manager's clock is the master. It takes samples in big
          * steps, so follow its average, and lean on the frame time by a hair
          * instead of ever holding a frame back. */
         queue_avg += (int)(ring_w - ring_r) - queue_avg / 16;
         const int excess = queue_avg / 16 - 2000;
-        deadline += frame_tb + (u32)((s32)(frame_tb >> 16) * (excess > 6000 ? 6000 : excess < -6000 ? -6000 : excess) / 8);
+        deadline += period + (u32)((s32)(frame_tb >> 16) * (excess > 6000 ? 6000 : excess < -6000 ? -6000 : excess) / 8);
         while ((s32)(timebase() - deadline) < 0) { }
         /* stalled: carry on from now, because racing to catch up floods the
          * sound queue and draws nothing */
-        if ((s32)(timebase() - deadline) > (s32)(frame_tb * 3)) deadline = timebase();
+        if ((s32)(timebase() - deadline) > (s32)(period * 3)) deadline = timebase();
         if (TickCount() - mark >= 60) {
             char t[80];
             const u32 ticks = TickCount() - mark, all = timebase() - t_mark;
@@ -1067,13 +1153,14 @@ int main(void) {
             if (!full_screen && !dsp_port) SetWTitle(win, (ConstStr255Param)t);
             {
                 char l[140];
-                snprintf(l, sizeof l, "%s  Events %d%%  Other %d%%  worst %d ms  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1,
-                         (int)(t_events / (all / 100 + 1)), (int)(t_other / (all / 100 + 1)), (int)((u64)t_worst * 1000 / tb_sec), video_path,
+                snprintf(l, sizeof l, "%s  Events %d%%  Other %d%%  worst %d ms  speed %d  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1,
+                         (int)(t_events / (all / 100 + 1)), (int)(t_other / (all / 100 + 1)), (int)((u64)t_worst * 1000 / tb_sec), speed_pct, video_path,
                          every_other ? " alt-lines" : "", dsp_port ? " full640" : full_screen ? " full" : "", snd_chan ? "on" : "off",
                          (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
                 const u32 p = all / 100 + 1;
-                snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p));
+                snprintf(l, sizeof l, "Split  68k %d%%  Z80 %d%%  VDP %d%%  YM %d%%  AltiVec lines %u", (int)(t_68k / p), (int)(t_z80 / p), (int)(t_vdp / p), (int)(t_ym / p), vdp_altivec_lines);
+                vdp_altivec_lines = 0;
                 log_line(l);
                 t_68k = t_z80 = t_vdp = t_ym = 0;
             }

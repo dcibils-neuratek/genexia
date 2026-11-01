@@ -20,6 +20,10 @@ EMU_STATE static u16 vsram[40];
 EMU_STATE static u8  regs[32];
 
 int vdp_widescreen = 1;
+#ifdef GENEXIA_OS9
+int vdp_altivec;
+unsigned vdp_altivec_lines;
+#endif
 EMU_STATE int vdp_native_w = 320;
 EMU_STATE int vdp_view_x = 0;
 EMU_STATE static int out_w = 320, pad_l = 0, pad_r = 0;
@@ -257,9 +261,9 @@ u16 vdp_read_hv(void)
 
 #define MAXW 512
 #define MARGIN 16
-static u8 line_a[MARGIN + MAXW + 32];
-static u8 line_b[MARGIN + MAXW + 32];
-static u8 line_s[MAXW];
+static u8 line_a[MARGIN + MAXW + 32] __attribute__((aligned(16)));
+static u8 line_b[MARGIN + MAXW + 32] __attribute__((aligned(16)));
+static u8 line_s[MAXW] __attribute__((aligned(16)));
 
 static inline u16 vram_w(u32 a)
 {
@@ -738,6 +742,18 @@ static void render_line(int line)
     #define FXMARK(x, s) do { int pl_ = ((s) >> 4) & 3; if (pl_ >= 2) fm[x] = (u8)(pl_ - 1); } while (0)
 #endif
     if (!(regs[12] & 0x08)) {
+#ifdef GENEXIA_OS9
+        static u8 mixed[MAXW] __attribute__((aligned(16)));
+        if (vdp_altivec && !x0 && !(((size_t)A | (size_t)B | (size_t)S | (size_t)mixed) & 15)) {
+            vdp_compose_altivec(mixed, A, B, S, x1);
+            const u32 saved = pal_n[0];
+            pal_n[0] = pal_n[bd];
+            for (int x = 0; x < x1; x++) out[x] = pal_n[mixed[x]];
+            pal_n[0] = saved;
+            vdp_altivec_lines++;
+            return;
+        }
+#endif
         for (int x = x0; x < x1; x++) {
             u8 a = A[x], b = B[x], s = S[x], c;
             if ((s & 15) && (s & 0x80)) { c = s; FXMARK(x, s); }
