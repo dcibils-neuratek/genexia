@@ -6,7 +6,10 @@
  * is read from a file called sf2.bin next to the application.
  *
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit,
- * F1 = draw every other line (faster, looks like scanlines).
+ * F1 = draw every other line (faster, looks like scanlines), F2 = full screen,
+ * F3 = set up a gamepad with InputSprocket.
+ *
+ * InputSprocket is found at run time, so the game still runs without it.
  * The title bar shows game and drawn frames per second, and the share of time
  * in the emulation and in drawing: how to judge a machine. The same numbers go
  * to genexia.log next to the application every second. The file is opened and
@@ -140,6 +143,8 @@ static void run_frame(void) {
 }
 
 /* -------------------------------------------------------------- input */
+static int isp_on;
+static u16 isp_read(void);
 static int key_down(const unsigned long *km, int code) {
     return (((const u8 *)km)[code >> 3] >> (code & 7)) & 1;
 }
@@ -155,6 +160,7 @@ static int read_keys(void) {
     u16 b = 0;
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
         if (key_down(km, map[i].code)) b |= map[i].pad;
+    if (isp_on) b |= isp_read();
     pad_state[0] = b;
     return key_down(km, 0x35);       /* Esc */
 }
@@ -162,22 +168,29 @@ static int read_keys(void) {
 /* -------------------------------------------------------------- video */
 static WindowPtr win;
 static GWorldPtr gw;
-static Rect pic;
+static Rect pic, gw_rect;
 
 static int in_front = 1, every_other, video_path;   /* video_path: last screen depth drawn to, 0 = system copy */
 
 static inline u32 timebase(void) { u32 t; __asm__ volatile("mftb %0" : "=r"(t)); return t; }
 
 /* Straight into video memory, when the whole picture is on the main screen at
- * 16 or 32 bits and nothing can cover it. Every second line is left out in
- * every_other mode. Returns 0 if the system has to do it instead. */
+ * 16 or 32 bits and nothing can cover it. Lines that did not change are left
+ * alone, and the rest go out 8 bytes at a time: the video bus takes those as
+ * bursts, about twice as fast as single words. Floating-point stores must be
+ * aligned there. Every second line is left out in every_other mode. Returns 0
+ * if the system has to do it instead. */
+static u32 last_frame[FB_H][FB_W];
+static int last_valid;
+static Point last_at;
+
 static int show_direct(void) {
     if (!in_front || FrontWindow() != win) return 0;
     GDHandle gd = GetMainDevice();
     PixMapHandle pm = (**gd).gdPMap;
     const int depth = (**pm).pixelSize;
     if (depth != 32 && depth != 16) return 0;
-    Point o = { 0, 0 };
+    Point o = { pic.top, pic.left };
     SetPort((GrafPtr)win);
     LocalToGlobal(&o);
     const Rect sr = (**gd).gdRect;
@@ -185,23 +198,41 @@ static int show_direct(void) {
     Rect r = { o.v, o.h, (short)(o.v + FB_H * 2), (short)(o.h + FB_W * 2) };
     const Point none = { 0, 0 };
     ShieldCursor(&r, none);
+    if (o.v != last_at.v || o.h != last_at.h) last_valid = 0;
+    last_at = o;
+    static union { double d[FB_W + 1]; u32 w[FB_W * 2 + 2]; u16 h[FB_W * 2 + 4]; } buf;
     const int row = (**pm).rowBytes & 0x3FFF;
     u8 *line = (u8 *)(**pm).baseAddr + (size_t)(o.v - (**pm).bounds.top) * row + (size_t)(o.h - (**pm).bounds.left) * (depth / 8);
+    const int bytes = FB_W * 2 * (depth / 8), aligned = !((size_t)line & 3) && !(row & 7);
     for (int y = 0; y < FB_H; y++, line += row * 2) {
         const u32 *src = &vdp_framebuffer[y * VDP_FB_STRIDE];
-        for (int rep = 0; rep < (every_other ? 1 : 2); rep++) {
-            if (depth == 32) {
-                volatile u32 *d = (volatile u32 *)(line + (size_t)rep * row);
-                for (int x = 0; x < FB_W; x++) { const u32 c = src[x]; d[0] = c; d[1] = c; d += 2; }
-            } else {
-                volatile u32 *d = (volatile u32 *)(line + (size_t)rep * row);
-                for (int x = 0; x < FB_W; x++) {
-                    const u32 c = src[x], p = (c >> 9 & 0x7C00) | (c >> 6 & 0x3E0) | (c >> 3 & 0x1F);
-                    *d++ = p << 16 | p;
-                }
+        if (last_valid && !memcmp(last_frame[y], src, FB_W * 4)) continue;
+        memcpy(last_frame[y], src, FB_W * 4);
+        const int skew = aligned ? (int)((size_t)line & 7) / 4 : 0;
+        if (depth == 32) {
+            u32 *p = buf.w + skew;
+            for (int x = 0; x < FB_W; x++, p += 2) p[0] = p[1] = src[x];
+        } else {
+            u32 *p = buf.w + skew;
+            for (int x = 0; x < FB_W; x++) {
+                const u32 c = src[x], q = (c >> 9 & 0x7C00) | (c >> 6 & 0x3E0) | (c >> 3 & 0x1F);
+                *p++ = q << 16 | q;
             }
         }
+        for (int rep = 0; rep < (every_other ? 1 : 2); rep++) {
+            volatile u8 *d = line + (size_t)rep * row;
+            const u8 *from = (const u8 *)buf.w + skew * 4;
+            int left = bytes;
+            if (!aligned) {              /* 16-bit picture on an odd pixel */
+                for (int i = 0; i < left; i += 2) *(volatile u16 *)(d + i) = *(const u16 *)(from + i);
+                continue;
+            }
+            if (skew) { *(volatile u32 *)d = *(const u32 *)from; d += 4; from += 4; left -= 4; }
+            for (; left >= 8; left -= 8, d += 8, from += 8) *(volatile double *)d = *(const double *)from;
+            if (left >= 4) *(volatile u32 *)d = *(const u32 *)from;
+        }
     }
+    last_valid = 1;
     ShowCursor();
     video_path = depth;
     return 1;
@@ -221,8 +252,63 @@ static void show_frame(void) {
         memcpy(base + ((size_t)y * 2 + 1) * row, a, FB_W * 2 * 4);
     }
     SetPort((GrafPtr)win);
-    CopyBits((BitMap *)*pm, &((GrafPtr)win)->portBits, &pic, &pic, srcCopy, NULL);
+    CopyBits((BitMap *)*pm, &((GrafPtr)win)->portBits, &gw_rect, &pic, srcCopy, NULL);
     UnlockPixels(pm);
+    last_valid = 0;
+}
+
+/* The window, or the whole screen with the menu bar out of the way. */
+static int full_screen;
+static RgnHandle gray_saved;
+static short mbar_saved;
+
+static void black_window(void) {
+    static const RGBColor black = { 0, 0, 0 };
+    SetPort((GrafPtr)win);
+    RGBBackColor(&black);
+    EraseRect(&((GrafPtr)win)->portRect);
+    last_valid = 0;
+}
+
+static void menu_bar_show(int show) {
+    RgnHandle gray = GetGrayRgn();
+    if (show) {
+        if (!gray_saved) return;
+        LMSetMBarHeight(mbar_saved);
+        CopyRgn(gray_saved, gray);
+        DisposeRgn(gray_saved);
+        gray_saved = NULL;
+        DrawMenuBar();
+    } else {
+        gray_saved = NewRgn();
+        CopyRgn(gray, gray_saved);
+        mbar_saved = GetMBarHeight();
+        RgnHandle all = NewRgn();
+        RectRgn(all, &qd.screenBits.bounds);
+        UnionRgn(gray, all, gray);
+        DisposeRgn(all);
+        LMSetMBarHeight(0);
+    }
+}
+
+static void open_window(int full) {
+    if (win) DisposeWindow(win);
+    menu_bar_show(!full);
+    const Rect sb = qd.screenBits.bounds;
+    Rect bounds;
+    if (full) {
+        bounds = sb;
+        win = NewCWindow(NULL, &bounds, "\pGenexia", true, plainDBox, (WindowPtr)-1, false, 0);
+        const short x = (short)(((sb.right - sb.left - FB_W * 2) / 2) & ~3), yy = (short)((sb.bottom - sb.top - FB_H * 2) / 2);
+        SetRect(&pic, x, yy, (short)(x + FB_W * 2), (short)(yy + FB_H * 2));
+    } else {
+        SetRect(&bounds, 0, 0, FB_W * 2, FB_H * 2);
+        pic = bounds;
+        OffsetRect(&bounds, (short)(((sb.right - FB_W * 2) / 2) & ~3), (short)((sb.bottom - FB_H * 2) / 2 + 10));
+        win = NewCWindow(NULL, &bounds, "\pGenexia build " GENEXIA_BUILD, true, noGrowDocProc, (WindowPtr)-1, false, 0);
+    }
+    full_screen = full;
+    black_window();
 }
 
 static void fail(ConstStr255Param msg) {
@@ -241,6 +327,118 @@ static void log_line(const char *t) {
     fclose(f);
 }
 
+/* ------------------------------------------------------- InputSprocket
+ * Declared here from Apple's definitions; functions come from the system's
+ * InputSprocketLib, so building needs no SDK. */
+typedef struct {
+    unsigned char name[64];
+    short icon;
+    u8 player, group;
+    u32 kind, label, flags, reserved[3];
+} IspNeed;
+typedef void *IspRef;
+enum { N_DPAD, N_A, N_B, N_C, N_X, N_Y, N_Z, N_START, N_MODE, N_COUNT };
+#define NEED(n, k, l) { n, 0, 1, 0, k, l, 4 /* polled */, { 0, 0, 0 } }
+#define BTN(n) NEED(n, 'butn', 'none')
+static IspNeed isp_needs[N_COUNT] = {
+    NEED("\pMove", 'dpad', 'move'), BTN("\pA"), BTN("\pB"), BTN("\pC"),
+    BTN("\pX"), BTN("\pY"), BTN("\pZ"), BTN("\pStart"), BTN("\pMode"),
+};
+static IspRef isp_refs[N_COUNT];
+
+typedef OSStatus (*Isp0)(void);
+static Isp0 isp_startup, isp_shutdown, isp_stop, isp_suspend, isp_resume, isp_tickle;
+static OSStatus (*isp_virtual)(u32, IspNeed *, IspRef *, u32);
+static OSStatus (*isp_init)(u32, IspNeed *, IspRef *, u32, u32, u32, short, u32);
+static OSStatus (*isp_configure)(void *);
+static OSStatus (*isp_extract)(u32, u32 *, IspRef *);
+static OSStatus (*isp_activate)(u32, IspRef *);
+static OSStatus (*isp_definition)(IspRef, u32, void *);
+static OSStatus (*isp_state)(IspRef, u32 *);
+
+static void *isp_find(ConnectionID lib, ConstStr255Param name) {
+    Ptr p = NULL;
+    SymClass c;
+    return FindSymbol(lib, name, &p, &c) == noErr ? p : NULL;
+}
+
+static void isp_log(const char *what, long v) {
+    char l[100];
+    snprintf(l, sizeof l, "InputSprocket: %s %ld", what, v);
+    log_line(l);
+}
+
+static void isp_open(void) {
+    ConnectionID lib;
+    Ptr entry;
+    Str255 why;
+    const OSErr e = GetSharedLibrary("\pInputSprocketLib", 'pwpc', 1, &lib, &entry, why);
+    if (e != noErr) { isp_log("library not found, error", e); return; }
+    isp_startup = isp_find(lib, "\pISpStartup");
+    isp_shutdown = isp_find(lib, "\pISpShutdown");
+    isp_stop = isp_find(lib, "\pISpStop");
+    isp_suspend = isp_find(lib, "\pISpSuspend");
+    isp_resume = isp_find(lib, "\pISpResume");
+    isp_tickle = isp_find(lib, "\pISpTickle");
+    isp_virtual = isp_find(lib, "\pISpElement_NewVirtualFromNeeds");
+    isp_init = isp_find(lib, "\pISpInit");
+    isp_configure = isp_find(lib, "\pISpConfigure");
+    isp_extract = isp_find(lib, "\pISpDevices_Extract");
+    isp_activate = isp_find(lib, "\pISpDevices_Activate");
+    isp_definition = isp_find(lib, "\pISpDevice_GetDefinition");
+    isp_state = isp_find(lib, "\pISpElement_GetSimpleState");
+    if (!isp_virtual || !isp_init || !isp_state || !isp_extract || !isp_activate || !isp_definition) {
+        isp_log("functions missing in this version", 0);
+        return;
+    }
+    if (isp_startup) { const OSStatus s = isp_startup(); isp_log("startup", s); }
+    OSStatus s = isp_virtual(N_COUNT, isp_needs, isp_refs, 0);
+    isp_log("virtual elements", s);
+    if (s != noErr) return;
+    s = isp_init(N_COUNT, isp_needs, isp_refs, 'GNXA', '0001', 0, 0, 0);
+    isp_log("init", s);
+    if (s != noErr) return;
+
+    /* every game controller, but not the keyboard and mouse the game needs */
+    static IspRef dev[32];
+    u32 n = 0, wanted = 0;
+    s = isp_extract(32, &n, dev);
+    isp_log("devices", (long)n);
+    if (n > 32) n = 32;
+    for (u32 i = 0; i < n; i++) {
+        static u8 def[512];
+        char l[120];
+        if (isp_definition(dev[i], sizeof def, def) != noErr) continue;
+        const u32 cls = (u32)def[64] << 24 | def[65] << 16 | def[66] << 8 | def[67];
+        snprintf(l, sizeof l, "InputSprocket: device %.*s class %.4s", def[0], def + 1, def + 64);
+        log_line(l);
+        if (cls != 'keyd' && cls != 'mous') dev[wanted++] = dev[i];
+    }
+    if (wanted) { s = isp_activate(wanted, dev); isp_log("activated", (long)wanted); }
+    isp_on = 1;
+}
+
+static u16 isp_read(void) {
+    static const u16 pads[9] = {
+        0, PAD_LEFT, PAD_UP | PAD_LEFT, PAD_UP, PAD_UP | PAD_RIGHT,
+        PAD_RIGHT, PAD_DOWN | PAD_RIGHT, PAD_DOWN, PAD_DOWN | PAD_LEFT,
+    };
+    static const u16 buttons[N_COUNT] = { 0, PAD_A, PAD_B, PAD_C, PAD_X, PAD_Y, PAD_Z, PAD_START, PAD_MODE };
+    if (isp_tickle) isp_tickle();
+    u32 v = 0;
+    u16 b = 0;
+    if (isp_state(isp_refs[N_DPAD], &v) == noErr && v < 9) b = pads[v];
+    for (int i = N_A; i < N_COUNT; i++)
+        if (isp_state(isp_refs[i], &v) == noErr && v) b |= buttons[i];
+    return b;
+}
+
+static void isp_close(void) {
+    if (!isp_on) return;
+    if (isp_stop) isp_stop();
+    if (isp_shutdown) isp_shutdown();
+}
+
 /* --------------------------------------------------------------- main */
 int main(void) {
     InitGraf(&qd.thePort);
@@ -251,17 +449,14 @@ int main(void) {
     InitDialogs(NULL);
     InitCursor();
 
-    Rect bounds = { 0, 0, FB_H * 2, FB_W * 2 };
-    pic = bounds;
-    OffsetRect(&bounds, (qd.screenBits.bounds.right - FB_W * 2) / 2, (qd.screenBits.bounds.bottom - FB_H * 2) / 2 + 10);
-    win = NewCWindow(NULL, &bounds, "\pGenexia build " GENEXIA_BUILD, true, noGrowDocProc, (WindowPtr)-1, false, 0);
-    SetPort((GrafPtr)win);
+    SetRect(&gw_rect, 0, 0, FB_W * 2, FB_H * 2);
+    open_window(0);
 
     FILE *f = fopen("sf2.bin", "rb");
     if (!f) fail("\pPut the ROM next to this application as sf2.bin, then restart.");
     rom_size = (u32)fread(rom, 1, sizeof rom, f);
     fclose(f);
-    if (NewGWorld(&gw, 32, &pic, NULL, NULL, 0) != noErr) fail("\pNot enough memory for the picture.");
+    if (NewGWorld(&gw, 32, &gw_rect, NULL, NULL, 0) != noErr) fail("\pNot enough memory for the picture.");
 
     bus_reset();
     vdp_init();
@@ -271,9 +466,10 @@ int main(void) {
     m68k_reset();
     sound_start();
     log_line("--- Genexia build " GENEXIA_BUILD);
+    isp_open();
 
     unsigned long next = TickCount(), mark = next;
-    int shown = 0, skipped = 0, ran = 0, f1_held = 0;
+    int shown = 0, skipped = 0, ran = 0, f1_held = 0, f2_held = 0, f3_held = 0;
     u32 t_emu = 0, t_vid = 0, t_mark = timebase();
     for (;;) {
         EventRecord ev;
@@ -283,6 +479,8 @@ int main(void) {
                 if (FindWindow(ev.where, &w) == inDrag) DragWindow(w, ev.where, &qd.screenBits.bounds);
             } else if (ev.what == osEvt && (ev.message >> 24 & 0xFF) == 1) {
                 in_front = ev.message & 1;   /* suspend or resume */
+                if (isp_on && isp_suspend && isp_resume) { if (in_front) isp_resume(); else isp_suspend(); }
+                last_valid = 0;
             } else if (ev.what == updateEvt) {
                 BeginUpdate((WindowPtr)ev.message);
                 EndUpdate((WindowPtr)ev.message);
@@ -295,10 +493,20 @@ int main(void) {
             const int f1 = key_down(km, 0x7A);
             if (f1 && !f1_held) {
                 every_other = !every_other;
-                SetPort((GrafPtr)win);
-                EraseRect(&pic);
+                black_window();
             }
             f1_held = f1;
+            const int f2 = key_down(km, 0x78), f3 = key_down(km, 0x63);
+            if (f2 && !f2_held) { open_window(!full_screen); next = TickCount(); }
+            f2_held = f2;
+            if (f3 && !f3_held && isp_on && isp_configure) {
+                if (full_screen) open_window(0);
+                const OSStatus s = isp_configure(NULL);
+                isp_log("configure", s);
+                black_window();
+                next = TickCount();
+            }
+            f3_held = f3;
         }
 
         /* late by more than a tick: run the game but don't draw */
@@ -313,6 +521,8 @@ int main(void) {
         else { show_frame(); t_vid += timebase() - t1; shown++; skipped = 0; }
 
         next++;
+        /* the Sound Manager's clock is the master: don't run ahead of it */
+        if (ring_w - ring_r > 2600) next++;
         while (TickCount() < next) { }
         if (TickCount() > next + 30) next = TickCount();
         if (TickCount() - mark >= 60) {
@@ -321,11 +531,12 @@ int main(void) {
             const int n = snprintf(t + 1, sizeof t - 1, "Game %d  Drawn %d  CPU %d%%  Draw %d%%", (int)(ran * 60 / ticks), (int)(shown * 60 / ticks),
                                    (int)(t_emu / (all / 100 + 1)), (int)(t_vid / (all / 100 + 1)));
             t[0] = (char)n;
-            SetWTitle(win, (ConstStr255Param)t);
+            if (!full_screen) SetWTitle(win, (ConstStr255Param)t);
             {
                 char l[120];
-                snprintf(l, sizeof l, "%s  video %d%s  sound %s  queued %d  ticks %lu", t + 1, video_path,
-                         every_other ? " alt-lines" : "", snd_chan ? "on" : "off", (int)(ring_w - ring_r), TickCount());
+                snprintf(l, sizeof l, "%s  video %d%s%s  sound %s  queued %d  pad %04X  ticks %lu", t + 1, video_path,
+                         every_other ? " alt-lines" : "", full_screen ? " full" : "", snd_chan ? "on" : "off",
+                         (int)(ring_w - ring_r), pad_state[0], TickCount());
                 log_line(l);
             }
             shown = ran = 0;
@@ -334,6 +545,8 @@ int main(void) {
             mark = TickCount();
         }
     }
+    isp_close();
     if (snd_chan) SndDisposeChannel(snd_chan, true);
+    if (full_screen) menu_bar_show(1);
     return 0;
 }

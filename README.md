@@ -345,10 +345,10 @@ quits. `--rom` skips the selector.
 `src/platforms/os9` is a small front end for PowerPC Macs on Mac OS 9, built with
 [Retro68](https://github.com/autc04/Retro68). It runs the same Genesis core and
 recompiled Street Fighter II, with a Toolbox window, the Sound Manager and the
-keyboard, and has no enhancements or save states. F1 draws every other line, which is faster. `make os9` leaves
+keyboard, and has no enhancements or save states. F1 draws every other line, which is faster. F2 is full screen, and F3 sets up a gamepad through InputSprocket, which is loaded from the system at run time. `make os9` leaves
 `build/os9/Genexia.dsk`, with the app and `sf2.bin` when the ROM is present. Keep
 the two files in one folder on the Mac. Keys are arrows, Z X C, A S D, Return for
-Start and Esc to quit. The title bar shows the frame rate.
+Start and Esc to quit. The title bar shows the frame rate, and `genexia.log` beside the app records it every second. `make os9-push` sends a build to a machine with File Sharing and guest access on, and `make os9-log` reads its log.
 
 Every build has a number: the commit count and commit, with `+` when it was
 built from uncommitted code. It is in the window title, at the top right of the
