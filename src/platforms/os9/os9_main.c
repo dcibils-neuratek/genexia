@@ -1198,18 +1198,27 @@ static void n64_draw(u32 dl) {
     gl_shown++;
 }
 
-static void n64_view(void) {
-    agl_drawable(gl_ctx, (CGrafPtr)win);
+static int n64_view(void) {
+    const int ok = agl_drawable(gl_ctx, dsp_port ? dsp_port : (CGrafPtr)win);
     int h = area_h, w = h * 4 / 3;
     if (w > area_w) { w = area_w; h = w * 3 / 4; }
     glClearColor(0, 0, 0, 1);
     f3d_view((area_w - w) / 2, (area_h - h) / 2, w, h);
+    return ok;
 }
 
-/* A whole screen copied out of the window takes half of each frame, so full
- * screen uses thousands of colours: half the data. aglSetFullScreen would flip
- * instead, but asking for its pixel format crashes here. */
+/* Full screen is DrawSprocket's, as for the other consoles, with OpenGL drawing
+ * to its port. aglSetFullScreen would be the usual way, but asking for its pixel
+ * format crashes here. A screen-sized window, in thousands of colours for half
+ * the copying, if the card won't draw to the port. */
 static void n64_full(int full) {
+    if (dsp_port) dsp_leave();
+    if (full && dsp_enter()) {
+        if (n64_view()) { log_line("full screen: exclusive"); return; }
+        log_line("full screen: OpenGL refused the DrawSprocket port");
+        agl_drawable(gl_ctx, NULL);
+        dsp_leave();
+    }
     if (full) depth_lower(); else depth_restore();
     open_window(full);
     n64_view();
@@ -1272,7 +1281,7 @@ static void n64_play(u32 tb_sec) {
         if (press(0x35)) break;
         if (press(0x78)) {
             agl_drawable(gl_ctx, NULL);
-            n64_full(!full_screen);
+            n64_full(!full_screen && !dsp_port);
             deadline = timebase();
         }
         if (press(0x64)) { stats_on = !stats_on; settings_save(); }
@@ -1303,10 +1312,10 @@ static void n64_play(u32 tb_sec) {
             stats_fresh = 1;
             char l[120];
             snprintf(l, sizeof l, "FPS %d  VI %d  CPU %d%%  Draw %d%%  compiled %d%%  sound queued %d  gaps %d  skipped %d  video%s", fps, vi,
-                     (int)((all - t_gl - t_idle) / p), (int)(t_gl / p), comp, (int)(ring_w - ring_r), snd_gaps - (int)gaps_was, gl_skipped, full_screen ? " full" : " window");
+                     (int)((all - t_gl - t_idle) / p), (int)(t_gl / p), comp, (int)(ring_w - ring_r), snd_gaps - (int)gaps_was, gl_skipped, dsp_port ? " exclusive" : full_screen ? " full" : " window");
             log_line(l);
             gaps_was = (u32)snd_gaps;
-            if (!full_screen) {
+            if (!full_screen && !dsp_port) {
                 char t[60];
                 const int n = snprintf(t + 1, sizeof t - 1, "Super Mario 64  FPS %d", fps);
                 t[0] = (char)n;
