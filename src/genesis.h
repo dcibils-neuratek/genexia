@@ -32,7 +32,7 @@ typedef uint64_t u64; typedef int64_t s64;
 /* biggest cartridge: 64 MB for the N64; the classic Mac build is Genesis only */
 #ifndef ROM_MAX
 #ifdef GENEXIA_OS9
-#define ROM_MAX 0x400000
+#define ROM_MAX 0x800000
 #else
 #define ROM_MAX 0x4000000
 #endif

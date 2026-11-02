@@ -419,6 +419,7 @@ static void flush(void) {
 
 static int fog_on, gl_fog = -1, gl_texon = -1, gl_blend = -1, gl_atest = -1, gl_ztest = -1, gl_zwrite = -1, gl_cull = -1, gl_decal = -1;
 static float tw_cur = 32, th_cur = 32;
+static int view_x, view_y, view_w = 640, view_h = 480;
 
 static void fog_unit(int on) {
     if (on == gl_fog) return;
@@ -496,7 +497,7 @@ static void apply_state(int rect) {
     }
     fog_unit(fog_on);
     glEnable(GL_SCISSOR_TEST);
-    glScissor(sc_x0 * 2, (240 - sc_y1) * 2, (sc_x1 - sc_x0) * 2, (sc_y1 - sc_y0) * 2);
+    glScissor(view_x + sc_x0 * view_w / 320, view_y + (240 - sc_y1) * view_h / 240, (sc_x1 - sc_x0) * view_w / 320, (sc_y1 - sc_y0) * view_h / 240);
 }
 
 /* ---------------------------------------------------------------- triangles */
@@ -744,6 +745,7 @@ static void walk(u32 a, int depth) {
 
 void f3d_init(void) {
     static const u8 white[4] = { 255, 255, 255, 255 };
+    gl_fog = gl_texon = gl_blend = gl_atest = gl_ztest = gl_zwrite = gl_cull = gl_decal = -1;   /* a new context knows nothing */
     glGenTextures(1, (GLuint *)&tex_white);
     glBindTexture(GL_TEXTURE_2D, tex_white);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
@@ -760,9 +762,55 @@ void f3d_init(void) {
     glVertexPointer(4, GL_FLOAT, 0, b_pos);
     glColorPointer(4, GL_UNSIGNED_BYTE, 0, b_col);
     glTexCoordPointer(2, GL_FLOAT, 0, b_st);
-    glViewport(0, 0, 640, 480);
+    f3d_view(0, 0, 640, 480);
     sc_x1 = 320; sc_y1 = 240;
     vp_sx = vp_sy = 1;
+}
+
+void f3d_view(int x, int y, int w, int h) {
+    view_x = x; view_y = y; view_w = w; view_h = h;
+    glViewport(x, y, w, h);
+}
+
+void f3d_overlay(const u32 *px, int w, int h, int stride, int fresh) {
+    static u8 t[32][256][4];
+    static GLuint id;
+    flush();
+    if (!id) {
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        fresh = 1;
+    } else glBindTexture(GL_TEXTURE_2D, id);
+    if (fresh) {
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const u32 c = px[y * stride + x];
+                t[y][x][0] = c >> 16; t[y][x][1] = c >> 8; t[y][x][2] = c; t[y][x][3] = 255;
+            }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
+    }
+    /* the game's next draw sets all of this again */
+    fog_unit(0);
+    glDisable(GL_SCISSOR_TEST); glDisable(GL_BLEND); glDisable(GL_ALPHA_TEST);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_POLYGON_OFFSET_FILL);
+    glEnable(GL_TEXTURE_2D);
+    gl_texon = 1; gl_blend = gl_atest = gl_ztest = gl_cull = gl_decal = 0;
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    const float x0 = -1 + 8.0f / 640, x1 = x0 + w * 4.0f / 640, y0 = 1 - 8.0f / 480, y1 = y0 - h * 4.0f / 480;
+    const float s = w / 256.0f, u = h / 32.0f;
+    const float v[6][4] = { { x0, y0, 0, 0 }, { x0, y1, 0, u }, { x1, y0, s, 0 }, { x1, y0, s, 0 }, { x0, y1, 0, u }, { x1, y1, s, u } };
+    for (int i = 0; i < 6; i++) {
+        b_pos[i][0] = v[i][0]; b_pos[i][1] = v[i][1]; b_pos[i][2] = 0; b_pos[i][3] = 1;
+        b_st[i][0] = v[i][2]; b_st[i][1] = v[i][3];
+        memset(b_col[i], 255, 4);
+    }
+    b_n = 6;
+    flush();
+    dirty = 1;
 }
 
 void f3d_run(u32 dl) {

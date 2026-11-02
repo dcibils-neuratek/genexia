@@ -1,7 +1,7 @@
 /*
  * os9_main.c - a small front end for Mac OS 9 on PowerPC (Retro68).
  *
- * Runs the same Genesis and SNES cores and recompiled games as the modern app,
+ * Runs the same Genesis, SNES and N64 cores and recompiled games as the modern app,
  * without SDL: Toolbox window, Sound Manager and the keyboard. The game selector
  * lists every ROM next to the application or in a roms folder there.
  *
@@ -28,6 +28,8 @@
 #include "enhance.h"
 #include "machine.h"
 #include "snes.h"
+#include "n64_machine.h"
+#include "f3d.h"
 #include "version.h"
 
 #define OUT_RATE 22050
@@ -52,7 +54,9 @@ static s16 ring[RING * 2];
 static volatile u32 ring_w, ring_r;
 static u32 rs_pos;                   /* 16.16 position in the native samples */
 static u32 rs_step = (u32)(((u64)YM_SAMPLE_RATE << 16) / OUT_RATE);
-static int snes_game, snd_rate = YM_SAMPLE_RATE, snd_gain = 4;   /* what the console puts out */
+static int snes_game, n64_game, snd_rate = YM_SAMPLE_RATE, snd_gain = 4;   /* what the console puts out */
+static int out_rate = OUT_RATE;      /* what the Sound Manager is asked for */
+static volatile int snd_ready = 1, snd_gaps;
 /* game speed in percent: sound follows it, like a tape running faster */
 static int speed_pct = 100;
 static void set_speed(int pct) {
@@ -103,8 +107,11 @@ static pascal void snd_back(SndChannelPtr chan, SndDoubleBufferPtr buf) {
     s16 *out = (s16 *)buf->dbSoundData;
     u32 r = ring_r;
     for (int i = 0; i < SND_FRAMES; i++) {
-        if (r != ring_w) { out[i * 2] = ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = ring[(r & (RING - 1)) * 2 + 1]; r++; }
-        else { out[i * 2] = 0; out[i * 2 + 1] = 0; }
+        if (snd_ready && r != ring_w) { out[i * 2] = ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = ring[(r & (RING - 1)) * 2 + 1]; r++; }
+        else {
+            out[i * 2] = 0; out[i * 2 + 1] = 0;
+            if (n64_game && snd_ready) { snd_ready = 0; snd_gaps++; }   /* ran dry: one gap, then fill up again */
+        }
     }
     ring_r = r;
     buf->dbNumFrames = SND_FRAMES;
@@ -119,7 +126,7 @@ static void sound_start(void) {
     snd_hdr.dbhSampleSize = 16;
     snd_hdr.dbhCompressionID = 0;
     snd_hdr.dbhPacketSize = 0;
-    snd_hdr.dbhSampleRate = (UnsignedFixed)((u32)OUT_RATE << 16);
+    snd_hdr.dbhSampleRate = (UnsignedFixed)((u32)out_rate << 16);
     snd_hdr.dbhDoubleBack = NewSndDoubleBackUPP(snd_back);
     for (int i = 0; i < 2; i++) {
         SndDoubleBufferPtr b = (SndDoubleBufferPtr)NewPtrClear(sizeof(SndDoubleBuffer) + SND_FRAMES * 4);
@@ -950,7 +957,7 @@ static int rom_code(const u8 *r) {
     if (hdr == 0xFC4C && !memcmp(r + 0x180, "GM T-097146", 11)) return 2;
     return 0;
 }
-enum { CODE_SMK = 3, CODE_SNES = 4 };      /* the other values: rom_code() */
+enum { CODE_SMK = 3, CODE_SNES = 4, CODE_SM64 = 5 };      /* the other values: rom_code() */
 
 /* the whole file into rom[], because a SNES header can be in several places */
 static int rom_read(const FSSpec *spec) {
@@ -974,6 +981,15 @@ static void game_probe(const FSSpec *spec) {
     const u8 *r = rom;
     Game *g = &games[ngames];
     g->file = *spec;
+    if (n64_detect()) {                      /* only the US Mario 64 has code here */
+        static const u8 crc[8] = { 0x63, 0x5A, 0x2B, 0xFF, 0x8B, 0x02, 0x23, 0x26 };
+        if (memcmp(r + 0x10, crc, 8)) return;
+        g->code = CODE_SM64;
+        strcpy(g->name, "Super Mario 64");
+        for (int i = 0; i < ngames; i++) if (!strcmp(games[i].name, g->name)) return;
+        ngames++;
+        return;
+    }
     if (memcmp(r + 0x100, "SEGA", 4)) {
         if (!snes_detect()) return;
         snes_name(g);
@@ -998,7 +1014,7 @@ static void game_probe(const FSSpec *spec) {
 }
 
 static void game_scan(short vol, long dir, int deep) {
-    static const char *const exts[] = { ".bin", ".md", ".gen", ".sfc", ".smc" };
+    static const char *const exts[] = { ".bin", ".md", ".gen", ".sfc", ".smc", ".z64" };
     for (short i = 1;; i++) {
         Str255 name;
         CInfoPBRec pb;
@@ -1016,7 +1032,7 @@ static void game_scan(short vol, long dir, int deep) {
             if (deep && !strcmp(c, "roms")) game_scan(vol, pb.dirInfo.ioDrDirID, 0);
             continue;
         }
-        for (int k = 0; k < 5; k++) {
+        for (int k = 0; k < 6; k++) {
             const int x = (int)strlen(exts[k]);
             FSSpec spec;
             if (n > x && !strcmp(c + n - x, exts[k]) && FSMakeFSSpec(vol, dir, name, &spec) == noErr) { game_probe(&spec); break; }
@@ -1096,6 +1112,10 @@ static int game_load(const Game *g) {
     if (!rom_read(&g->file)) return 0;
     snprintf(l, sizeof l, "Game: %s (%s)", g->name, g->code && g->code != CODE_SNES ? "recompiled" : "interpreter");
     log_line(l);
+    if (g->code == CODE_SM64) {
+        n64_game = 1;
+        return 1;
+    }
     if (g->code >= CODE_SMK) {
         Game again = *g;
         snes_name(&again);
@@ -1122,6 +1142,211 @@ static int game_load(const Game *g) {
     }
     region_version = us ? 0xA0 : jp ? 0x20 : eu ? 0xE0 : 0xA0;
     return 1;
+}
+
+/* --------------------------------------------------------- Nintendo 64
+ * Super Mario 64 from its compact recompiled code. The RSP's two jobs are done
+ * here instead: pictures go to OpenGL through f3d.c, sound through aspmain.c.
+ * OpenGL is found at run time and draws straight into the window, so this has
+ * its own loop. Keys as for the other games; Z = A, X = B, C = Z. F2 full
+ * screen, F8 stats, Esc quit. */
+#define X(r, n, a) r (*n) a;
+GL_FUNCTIONS
+#undef X
+void rsp_reset(void) {}
+int  rsp_run(int c) { return c; }
+void rsp_set_pc(u32 pc) {}
+u32  rsp_get_pc(void) { return 0; }
+void rdp_reset(void) {}
+void rdp_run(u32 s, u32 e, int x) {}
+void rdp_wide_frame(int d) {}
+void rdp_set_hires(int n, int w) {}
+void rdp_hires_resync(void) {}
+int  rdp_hires_fetch(u32 o, int a, u32 *p, int w, int h) { return 0; }
+extern void (*n64_gfx_hook)(u32);
+extern long long r4300_native_cycles, r4300_interp_cycles;
+
+#define SND_TARGET 4000.0            /* stereo frames queued, about 1/8 second */
+typedef void *AGLPixelFormat, *AGLContext;
+enum { AGL_NONE = 0, AGL_RGBA = 4, AGL_DOUBLEBUFFER = 5, AGL_DEPTH_SIZE = 12, AGL_FULLSCREEN = 54, AGL_ACCELERATED = 73 };
+static CFragConnection *gl_lib;
+static AGLContext gl_ctx, gl_win_ctx, gl_fs_ctx;
+static AGLPixelFormat (*agl_choose)(const void *, long, const long *);
+static AGLContext (*agl_create)(AGLPixelFormat, AGLContext);
+static unsigned char (*agl_current)(AGLContext);
+static void (*agl_swap)(AGLContext);
+static unsigned char (*agl_drawable)(AGLContext, CGrafPtr);
+static unsigned char (*agl_full)(AGLContext, long, long, long, long);
+static u32 t_gl;
+static int gl_shown, gl_skipped, stats_fresh;
+
+static void *gl_sym(const char *name) {
+    Str255 p; Ptr a = NULL; unsigned char c;
+    p[0] = (unsigned char)strlen(name); memcpy(p + 1, name, p[0]);
+    return FindSymbol(gl_lib, p, &a, &c) == noErr ? a : NULL;
+}
+
+static void n64_draw(u32 dl) {
+    /* sound about to run dry: this picture is the one thing nobody would hear,
+     * but drop one in four at most or the title screen turns into a slide show */
+    static int since_drop;
+    if (since_drop >= 3 && (u32)(ring_w - ring_r) < 1100) { since_drop = 0; gl_skipped++; return; }
+    since_drop++;
+    const u32 t = timebase();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    f3d_run(dl);
+    if (stats_on && stats_w) { f3d_overlay(stats_px[0], stats_w, STATS_H, STATS_W, stats_fresh); stats_fresh = 0; }
+    agl_swap(gl_ctx);
+    t_gl += timebase() - t;
+    gl_shown++;
+}
+
+static void n64_view(void) {
+    agl_drawable(gl_ctx, (CGrafPtr)win);
+    int h = area_h, w = h * 4 / 3;
+    if (w > area_w) { w = area_w; h = w * 3 / 4; }
+    glClearColor(0, 0, 0, 1);
+    f3d_view((area_w - w) / 2, (area_h - h) / 2, w, h);
+}
+
+/* Flipping the card's own buffers beats copying a screenful out of a window,
+ * which took half of each frame. That needs a second context, sharing the first
+ * one's textures; a big window if the card won't do it. */
+static void n64_full(int full) {
+    const Rect sb = qd.screenBits.bounds;
+    const int sw = sb.right - sb.left, sh = sb.bottom - sb.top;
+    if (full && !gl_fs_ctx && agl_full) {
+        static const long attr[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_ACCELERATED, AGL_FULLSCREEN, AGL_NONE };
+        GDHandle gd = GetMainDevice();
+        AGLPixelFormat pf = agl_choose(&gd, 1, attr);
+        if (pf) gl_fs_ctx = agl_create(pf, gl_win_ctx);
+        log_line(gl_fs_ctx ? "full screen: context made" : "full screen: no context");
+    }
+    if (full && gl_fs_ctx && agl_current(gl_fs_ctx) && agl_full(gl_fs_ctx, sw, sh, 0, 0)) {
+        gl_ctx = gl_fs_ctx;
+        full_screen = 1;
+        area_w = sw; area_h = sh;
+        menu_bar_show(0);
+        f3d_init();
+        const int w = sh * 4 / 3 > sw ? sw : sh * 4 / 3, h = w * 3 / 4;
+        f3d_view((sw - w) / 2, (sh - h) / 2, w, h);
+        log_line("full screen: flipping");
+        return;
+    }
+    if (gl_ctx != gl_win_ctx) { agl_drawable(gl_ctx, NULL); gl_ctx = gl_win_ctx; }
+    agl_current(gl_ctx);
+    open_window(full);
+    f3d_init();
+    n64_view();
+}
+
+static const char *n64_gl_open(void) {
+    Ptr entry; Str255 err;
+    static char why[60];
+    if (GetSharedLibrary("\pOpenGLLibrary", kPowerPCArch, kReferenceCFrag, &gl_lib, &entry, err)) return "no OpenGLLibrary";
+#define X(r, n, a) if (!(n = (r (*) a)gl_sym(#n))) { snprintf(why, sizeof why, "no %s", #n); return why; }
+    GL_FUNCTIONS
+#undef X
+    agl_choose = gl_sym("aglChoosePixelFormat");
+    agl_create = gl_sym("aglCreateContext");
+    agl_current = gl_sym("aglSetCurrentContext");
+    agl_swap = gl_sym("aglSwapBuffers");
+    agl_drawable = gl_sym("aglSetDrawable");
+    agl_full = gl_sym("aglSetFullScreen");
+    static const long attr[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_ACCELERATED, AGL_NONE };
+    AGLPixelFormat pf = agl_choose ? agl_choose(NULL, 0, attr) : NULL;
+    if (!pf) return "no accelerated OpenGL";
+    gl_ctx = gl_win_ctx = agl_create(pf, NULL);
+    if (!gl_ctx || !agl_drawable(gl_ctx, (CGrafPtr)win) || !agl_current(gl_ctx)) return "no OpenGL context";
+    f3d_init();
+    n64_view();
+    return NULL;
+}
+
+static void n64_sound_feed(void) {
+    static s16 t[1024 * 2];
+    u32 w = ring_w;
+    const int n = n64_audio_take(t, 1024);
+    for (int i = 0; i < n && w - ring_r < RING; i++, w++) {
+        ring[(w & (RING - 1)) * 2] = t[i * 2];
+        ring[(w & (RING - 1)) * 2 + 1] = t[i * 2 + 1];
+    }
+    ring_w = w;
+    if (w - ring_r >= SND_FRAMES * 2) snd_ready = 1;
+}
+
+/* tb_sec: the timebase's rate. Returns at Esc. */
+static void n64_play(u32 tb_sec) {
+    n64_load();
+    n64_register_game = recomp_register_sm64;
+    n64_reset();
+    n64_gfx_hook = n64_draw;
+    out_rate = 32000;
+    snd_ready = 0;
+    sound_start();
+    /* the sound clock is the master: bend the frame length by up to 2% to hold the queue */
+    const u32 frame = (u32)((u64)tb_sec * 1000 / 59940);
+    double level = SND_TARGET;
+    int ran = 0;
+    u32 t_idle = 0, t_mark = timebase(), deadline = t_mark + frame, gaps_was = 0;
+    unsigned long mark = TickCount();
+    long long nat0 = 0, emu0 = 0;
+    for (;;) {
+        if (!(ran & 3)) pump();              /* a millisecond each time, and the title has none spare */
+        read_keys();
+        keys_poll();
+        if (press(0x35)) break;
+        if (press(0x78)) {
+            agl_drawable(gl_ctx, NULL);
+            n64_full(!full_screen);
+            deadline = timebase();
+        }
+        if (press(0x64)) { stats_on = !stats_on; settings_save(); }
+        n64_run_frame();
+        ran++;
+        n64_sound_feed();
+
+        level += ((double)(u32)(ring_w - ring_r) - level) * 0.05;
+        double trim = (level - SND_TARGET) / SND_TARGET * 0.04;
+        trim = trim > 0.02 ? 0.02 : trim < -0.02 ? -0.02 : trim;
+        const u32 t0 = timebase();
+        deadline += (u32)(frame * (1 + trim));
+        while ((s32)(timebase() - deadline) < 0) { }
+        const u32 t1 = timebase();
+        t_idle += t1 - t0;
+        if ((s32)(t1 - deadline) > (s32)(frame * 6)) deadline = t1;
+
+        if (TickCount() - mark >= 60) {
+            const u32 ticks = TickCount() - mark, all = timebase() - t_mark, p = all / 100 + 1;
+            const long long nat = r4300_native_cycles - nat0, emu = r4300_interp_cycles - emu0;
+            nat0 += nat; emu0 += emu;
+            const int comp = (int)(nat / 100 * 100 / (nat / 100 + emu / 100 + 1));
+            const int fps = (int)(gl_shown * 60 / ticks), vi = (int)(ran * 60 / ticks);
+            snprintf(stats[0], sizeof stats[0], "FPS %d  VI %d", fps, vi);
+            snprintf(stats[1], sizeof stats[1], "MIPS COMPILED %d%% EMULATED %d%%", comp, 100 - comp);
+            snprintf(stats[2], sizeof stats[2], "CPU %d DRAW %d", (int)((all - t_gl - t_idle) / p), (int)(t_gl / p));
+            stats_render();
+            stats_fresh = 1;
+            char l[120];
+            snprintf(l, sizeof l, "FPS %d  VI %d  CPU %d%%  Draw %d%%  compiled %d%%  sound queued %d  gaps %d  skipped %d  video%s", fps, vi,
+                     (int)((all - t_gl - t_idle) / p), (int)(t_gl / p), comp, (int)(ring_w - ring_r), snd_gaps - (int)gaps_was, gl_skipped, full_screen ? " full" : " window");
+            log_line(l);
+            gaps_was = (u32)snd_gaps;
+            if (!full_screen) {
+                char t[60];
+                const int n = snprintf(t + 1, sizeof t - 1, "Super Mario 64  FPS %d", fps);
+                t[0] = (char)n;
+                SetWTitle(win, (ConstStr255Param)t);
+            }
+            ran = gl_shown = 0;
+            t_gl = t_idle = 0;
+            t_mark = timebase();
+            mark = TickCount();
+        }
+    }
+    n64_gfx_hook = NULL;
+    agl_drawable(gl_ctx, NULL);
 }
 
 /* --------------------------------------------------------------- main */
@@ -1160,17 +1385,27 @@ int main(void) {
     const Game *game = game_select();
     if (game) {
         if (!game_load(game)) fail("\pThat game could not be read.");
-        set_speed(speed_pct);
-        vdp_init();
-        if (snes_game) snes_reset();
-        else {
-            bus_reset();
-            z80_reset();
-            ym2612_reset();
-            psg_reset();
-            m68k_reset();
+        if (n64_game) {
+            if (dsp_port) dsp_leave();
+            depth_restore();                 /* 3D wants the millions of colours back */
+            const char *why = n64_gl_open();
+            if (why) {
+                log_line(why);
+                fail("\pSuper Mario 64 needs OpenGL with a 3D card.");
+            }
+        } else {
+            set_speed(speed_pct);
+            vdp_init();
+            if (snes_game) snes_reset();
+            else {
+                bus_reset();
+                z80_reset();
+                ym2612_reset();
+                psg_reset();
+                m68k_reset();
+            }
+            sound_start();
         }
-        sound_start();
     }
 
     /* The timebase runs at a rate only the machine knows: measure it. */
@@ -1184,6 +1419,7 @@ int main(void) {
     char cal[60];
     snprintf(cal, sizeof cal, "Timebase: %lu per second", (unsigned long)tb_sec);
     log_line(cal);
+    if (n64_game) { n64_play(tb_sec); game = NULL; }
 
     int shown = 0, skipped = 0, ran = 0, queue_avg = 2000 * 16, loops = 0;
     u32 t_emu = 0, t_vid = 0, t_events = 0, t_other = 0, t_worst = 0, t_mark = timebase(), deadline = t_mark, t_loop = t_mark;
