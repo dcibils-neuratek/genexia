@@ -51,6 +51,7 @@ static AGLContext ctx;
 static void (*aglSwapBuffers_)(AGLContext);
 static double gfx_ms, idle_ms;
 static int want_shot;
+static int snd_on;
 
 static void *sym(const char *name) {
     Str255 p; Ptr a = NULL; unsigned char c;
@@ -58,7 +59,17 @@ static void *sym(const char *name) {
     return FindSymbol(lib, p, &a, &c) == noErr ? a : NULL;
 }
 
+#define SND_FRAMES 1024
+#define RING 8192
+#define SND_TARGET 4000.0
+static volatile u32 ring_w, ring_r;
+static long gfx_skipped;
+
 static void gfx(u32 dl) {
+    /* sound running low: this picture is the one thing that can go without being heard */
+    static int skipped;
+    if (!skipped && (u32)(ring_w - ring_r) < 1100 && snd_on) { skipped = 1; gfx_skipped++; return; }
+    skipped = 0;
     const double t = now_ms();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -80,10 +91,9 @@ static void gfx(u32 dl) {
 }
 
 /* Sound Manager takes it from here: a ring the callback empties at interrupt time */
-#define SND_FRAMES 1024
-#define RING 8192
 static s16 ring[RING * 2];
-static volatile u32 ring_w, ring_r;
+static volatile int snd_ready;
+static double snd_level = SND_TARGET;
 static double asp_ms;
 static long snd_short;
 extern int n64_audio_rate;
@@ -92,8 +102,11 @@ static pascal void snd_back(SndChannelPtr chan, SndDoubleBufferPtr buf) {
     s16 *out = (s16 *)buf->dbSoundData;
     u32 r = ring_r;
     for (int i = 0; i < SND_FRAMES; i++) {
-        if (r != ring_w) { out[i * 2] = ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = ring[(r & (RING - 1)) * 2 + 1]; r++; }
-        else { out[i * 2] = 0; out[i * 2 + 1] = 0; snd_short++; }
+        if (snd_ready && r != ring_w) { out[i * 2] = ring[(r & (RING - 1)) * 2]; out[i * 2 + 1] = ring[(r & (RING - 1)) * 2 + 1]; r++; }
+        else {
+            out[i * 2] = 0; out[i * 2 + 1] = 0;
+            if (snd_ready) { snd_ready = 0; snd_short++; }   /* ran dry: one gap, then fill up again */
+        }
     }
     ring_r = r;
     buf->dbNumFrames = SND_FRAMES;
@@ -125,6 +138,7 @@ static void sound_feed(void) {
         ring[(w & (RING - 1)) * 2 + 1] = t[i * 2 + 1];
     }
     ring_w = w;
+    if (w - ring_r >= SND_FRAMES * 2) snd_ready = 1;
 }
 
 /* Z A, X B, C Z, arrows the stick, Return Start, same as the other games */
@@ -199,8 +213,10 @@ int main(int argc, char **argv) {
 #ifdef N64_GL
     FILE *sf = fopen("n64script.txt", "r");
     const int scripted = sf != NULL;
-    if (sf) fclose(sf);
+    int want_shots = 0;
+    if (sf) { want_shots = fgetc(sf) == 's'; fclose(sf); }
     sound_start();
+    snd_on = 1;
 #else
     const int scripted = 1;
 #endif
@@ -222,7 +238,7 @@ int main(int argc, char **argv) {
         if (scripted && fr > 3600 && fr % 40 < 4) pad_state[0] = PAD_A;   /* through the dialog */
         if (scripted && fr > 5200) pad_state[0] = PAD_UP | (fr % 80 < 10 ? PAD_A : 0);
 #ifdef N64_GL
-        if (fr == 3300 || fr == 5400 || fr == 6600) want_shot = fr / 1000;
+        if (scripted && want_shots && (fr == 3300 || fr == 5400 || fr == 6600)) want_shot = fr / 1000;
 #endif
         n64_run_frame();
 #ifdef N64_GL
@@ -231,8 +247,13 @@ int main(int argc, char **argv) {
         double t = now_ms();
 #ifdef N64_GL
         /* real speed, so it can be watched; the wait doesn't count as work */
+        /* the sound card's clock is the master: steer the frame length by up to 2% to hold the ring near SND_TARGET */
         const double due = next_due;
-        next_due += 16.683;
+        snd_level += ((double)(u32)(ring_w - ring_r) - snd_level) * 0.05;
+        double trim = (snd_level - SND_TARGET) / SND_TARGET * 0.04;
+        if (trim > 0.02) trim = 0.02;
+        if (trim < -0.02) trim = -0.02;
+        next_due += 16.683 * (1 + trim);
         if (t < due) { const double w = t; while ((t = now_ms()) < due) {} idle_ms += t - w; t0 += t - w; last += t - w; }
         else if (t > due + 100) next_due = t + 16.683;
 #endif
@@ -244,9 +265,9 @@ int main(int argc, char **argv) {
             fflush(log);
 #ifdef N64_GL
             const long d = f3d_stats.frames - st0.frames;
-            fprintf(log, "   %ld pictures, %.1f fps possible, gl %.1f ms each, %ld tris, %ld draws, %ld uploads each; sound short %ld\n", d,
+            fprintf(log, "   %ld pictures, %.1f fps possible, gl %.1f ms each, %ld tris, %ld draws, %ld uploads each; sound short %ld, level %d, skipped %ld\n", d,
                     d * 1000.0 / (t - t0), d ? gfx_ms / d : 0.0, d ? (f3d_stats.tris - st0.tris) / d : 0, d ? (f3d_stats.draws - st0.draws) / d : 0,
-                    d ? (f3d_stats.tex_uploads - st0.tex_uploads) / d : 0, snd_short);
+                    d ? (f3d_stats.tex_uploads - st0.tex_uploads) / d : 0, snd_short, (int)snd_level, gfx_skipped);
             fflush(log);
             st0 = f3d_stats; gfx_ms = 0;
 #endif
