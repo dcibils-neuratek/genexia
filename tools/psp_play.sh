@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 G="$HOME/Library/Application Support/Genexia/games-psp/$1"
 python3 tools/psp_nids.py build/psp_nids.h
 clang -O2 -w -c -fobjc-arc -Isrc/backends/psp $(sdl2-config --cflags) src/backends/psp/psp_metal.m -o build/psp_metal.o
-clang -O2 -w -std=gnu11 -DPSP_WINDOW -DPSP_METAL -Isrc/chips -Ibuild -Isrc/backends/psp $(sdl2-config --cflags) \
+clang -O2 -w -std=gnu11 -DPSP_WINDOW -DPSP_METAL -Isrc/chips -Ibuild -Isrc/backends/psp $(sdl2-config --cflags) $(pkg-config --cflags libavcodec) \
   src/backends/psp/psp_runtime.c src/backends/psp/psp_vfpu.c src/backends/psp/psp_ge.c build/psp_metal.o "$G"/obj/*.o \
-  $(sdl2-config --libs) -lm -framework Metal -framework QuartzCore -framework Foundation -o "$G/play"
+  $(sdl2-config --libs) $(pkg-config --libs libavcodec libavutil) -lm -framework Metal -framework QuartzCore -framework Foundation -o "$G/play"
 exec "$G/play" "$2" "$3" 999999

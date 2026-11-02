@@ -10,6 +10,7 @@
  */
 #include <stdarg.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -87,13 +88,15 @@ static int new_thread(const char *name, u32 entry, int prio, u32 stack) {
 #include "psp_interp.c"
 #include "psp_audio.c"
 #include "psp_intr.c"
+#include "psp_codec.c"
+#include "psp_save.c"
 
 #ifdef PSP_WINDOW
 #include "psp_window.c"
 #endif
 
 #define PUT_RETURN 0x08000020u
-static u32 put_return[MAX_THREADS], movie_frames;
+static u32 put_return[MAX_THREADS];
 
 static void schedule(void) {
     if (in_intr) return;
@@ -223,7 +226,7 @@ static s64 file_read(int f, u32 to, u32 n) {
 #define RET(v) (p.r[2] = (u32)(v))
 static const char *gstr(u32 a) { return a ? (const char *)M(a) : ""; }
 static u32 clock_pll = 222, clock_cpu = 222, clock_bus = 111;
-static int dialog;
+static int dialog = -1;
 static u32 psmf_status, vcount, fb_addr, fb_stride, fb_fmt, ge_lists;
 static u32 blocks_alloc[1024][2]; static int nalloc;
 static u32 uid_alloc(u32 addr, u32 size) { blocks_alloc[nalloc][0] = addr; blocks_alloc[nalloc][1] = size; return 0x2000 + nalloc++; }
@@ -302,6 +305,9 @@ static void hle(int i) {
         if (IS("sceIoOpenAsync")) { if (f >= 0) { files[f].async = f; RET(f); } else RET(0x80010002u); }
         else RET(f < 0 ? 0x80010002u : (u32)f);
     }
+    else if (IS("sceIoDopen")) RET(save_dir_open(gstr(A0)));
+    else if (IS("sceIoDread")) RET(save_dir_read(A0, A1));
+    else if (IS("sceIoDclose")) RET(save_dir_close(A0));
     else if (IS("sceIoDevctl")) {                       /* a Memory Stick that's in, ready and has room */
         fprintf(lg, "devctl %s %08X\n", gstr(A0), A1);
         if (A1 == 0x02025806 && T0) WR32(T0, 1);        /* inserted */
@@ -371,35 +377,37 @@ static void hle(int i) {
 #endif
         RET(1);
     }
-    /* movies: the stream is sized and accepted, and there's no decoder yet, so no frame ever comes */
     else if (IS("sceMpegQueryMemSize")) RET(0x10000);
     else if (IS("sceMpegRingbufferQueryMemSize")) RET(A0 * (104 + 2048));
     else if (IS("sceMpegRingbufferConstruct")) {
         WR32(A0, A1); WR32(A0 + 4, 0); WR32(A0 + 8, 0); WR32(A0 + 12, A1); WR32(A0 + 16, 2048);
         WR32(A0 + 20, A2); WR32(A0 + 24, T0); WR32(A0 + 28, T1);
+        mpeg_reset(A0, A1, A2);
     }
     else if (IS("sceMpegRingbufferAvailableSize")) RET(RD32(A0 + 12));
     else if (IS("sceMpegRingbufferPut")) {             /* the game's callback fetches the file, and may wait */
-        const u32 ring = A0, cb = RD32(ring + 24), n = A1 < A2 ? A1 : A2;
+        const u32 ring = A0, cb = RD32(ring + 24), room = mp.packets - mp.wrote;
+        u32 n = A1 < A2 ? A1 : A2;
+        if (n > room) n = room;
+        RET(0);
         if (cb && n) {
             put_return[cur] = p.pc;
-            p.r[4] = RD32(ring + 20); p.r[5] = n; p.r[6] = RD32(ring + 28);
+            p.r[4] = RD32(ring + 20) + mp.wrote * 2048; p.r[5] = n; p.r[6] = RD32(ring + 28);
             p.r[31] = PUT_RETURN; p.pc = cb;
         }
     }
     else if (IS("sceMpegQueryStreamOffset")) { WR32(A2, __builtin_bswap32(RD32(A1 + 8))); }
     else if (IS("sceMpegQueryStreamSize")) { WR32(A1, __builtin_bswap32(RD32(A0 + 12))); }
     else if (IS("sceMpegRegistStream")) RET(1);
-    else if (IS("sceMpegGetAtracAu")) RET(0x80618001u);
-    else if (IS("sceMpegGetAvcAu") || IS("sceMpegGetAvcEsAu")) {    /* blank frames, as many as the stream holds */
-        if (!movie_frames) RET(0x80618001u);
-        else {
-            static u32 pts;
-            movie_frames--; pts += 3003;
-            WR32(A2, 0); WR32(A2 + 4, pts); WR32(A2 + 8, 0); WR32(A2 + 12, pts);
-        }
+    else if (IS("sceMpegQueryAtracEsSize")) { if (A1) WR32(A1, 2112); if (A2) WR32(A2, 8192); }
+    else if (IS("sceMpegGetAtracAu")) RET(mpeg_next_audio(A2));
+    else if (IS("sceMpegAtracDecode")) { mpeg_decode_audio(A2); if (A3) WR32(A3, 0); }
+    else if (IS("sceMpegGetAvcAu") || IS("sceMpegGetAvcEsAu")) { const u32 attr = A3; RET(mpeg_next_video(A2)); if (!p.r[2] && attr) WR32(attr, 1); }
+    else if (IS("sceMpegAvcDecode")) { const int shown = mpeg_decode_video((int)A2, RD32(A3)); if (T0) WR32(T0, (u32)shown); }
+    else if (IS("sceMpegAvcDecodeDetail")) {
+        WR32(A1, 1); WR32(A1 + 4, mp.decoded > 0); WR32(A1 + 8, (u32)mp.width); WR32(A1 + 12, (u32)mp.height);
+        WR32(A1 + 16, 0); WR32(A1 + 20, 0); WR32(A1 + 24, 0); WR32(A1 + 28, 0);
     }
-    else if (IS("sceMpegAvcDecode")) { if (T0) WR32(T0, 1); }
     else if (IS("sceKernelLoadModule")) {                 /* a module that's on the disc loads; its functions are ours */
         const char *c = strchr(gstr(A0), ':'); u32 lba, size;
         const int found = c && !strncmp(gstr(A0), "disc0", 5) && iso_find(c + 1, &lba, &size);
@@ -407,11 +415,25 @@ static void hle(int i) {
         RET(found ? 0x5000 + lba % 4096 : 0x80010002u);
     }
     else if (IS("sceKernelVolatileMemLock") || IS("sceKernelVolatileMemTryLock")) { if (A1) WR32(A1, 0x08400000); if (A2) WR32(A2, 0x400000); }
-    else if (IS("sceAtracDecodeData")) {                 /* no decoder yet: music plays as silence */
-        if (A1) memset(M(A1), 0, 2048 * 2);
-        if (A2) WR32(A2, 1024);
-        if (A3) WR32(A3, 0);
-        if (T0) WR32(T0, 0xFFFFFFFFu);
+    else if (IS("sceAtracSetDataAndGetID")) RET(atrac_set_data(A0, A1));
+    else if (IS("sceAtracReleaseAtracID")) { struct Atrac *a = atrac_of(A0); if (a) atrac_release(a); }
+    else if (IS("sceAtracSetLoopNum")) { struct Atrac *a = atrac_of(A0); if (a) a->loops = (int)A1; }
+    else if (IS("sceAtracGetRemainFrame")) { struct Atrac *a = atrac_of(A0); if (a) WR32(A1, atrac_remain(a)); }
+    else if (IS("sceAtracAddStreamData")) { struct Atrac *a = atrac_of(A0); if (a) atrac_add(a, A1); }
+    else if (IS("sceAtracGetStreamDataInfo")) {
+        struct Atrac *a = atrac_of(A0); u32 write = 0, room = 0, from = 0;
+        if (a) atrac_stream_info(a, &write, &room, &from);
+        if (A1) WR32(A1, write);
+        if (A2) WR32(A2, room);
+        if (A3) WR32(A3, from);
+    }
+    else if (IS("sceAtracDecodeData")) {
+        struct Atrac *a = atrac_of(A0); u32 finished = 1;
+        const u32 made = a ? atrac_decode(a, A1, &finished) : 0x80630005u;
+        if (A2) WR32(A2, made >> 31 ? 0 : made);
+        if (A3) WR32(A3, finished);
+        if (T0) WR32(T0, a ? atrac_remain(a) : 0);
+        RET(made >> 31 ? made : 0);
     }
     else if (IS("__sceSasGetEndFlag")) RET(sas_end_flags());
     else if (IS("__sceSasInit")) { sas_grain = (int)A1; }
@@ -425,13 +447,17 @@ static void hle(int i) {
     else if (IS("sceAudioChRelease")) { if (A0 < AUDIO_CHANNELS) chans[A0].reserved = 0; }
     else if (IS("sceAudioSetChannelDataLen")) { if (A0 < AUDIO_CHANNELS) chans[A0].samples = (int)A1; }
     else if (IS("sceKernelGetSystemTime")) { WR32(A0, (u32)now_us); WR32(A0 + 4, (u32)(now_us >> 32)); }
+    else if (IS("sceUtilitySavedataInitStart")) save_start(A0);
+    else if (IS("sceUtilitySavedataGetStatus")) RET(dialog_status(&save_status));
+    else if (IS("sceUtilitySavedataUpdate")) { if (save_status == 2) save_status = 3; }
+    else if (IS("sceUtilitySavedataShutdownStart")) save_status = 4;
     else if (IS("sceUtilityMsgDialogInitStart")) {
         dialog = 1;
         fprintf(lg, "dialog size %X mode %X flags %X error %X:", RD32(A0), RD32(A0 + 0x30), RD32(A0 + 0x38), RD32(A0 + 0x34));
         for (u32 o = 0x30; o < 0x280; o++) { const u8 c = RD8(A0 + o); if (c >= 32 && c < 127) fputc(c, lg); }
         fputc('\n', lg);
     }
-    else if (IS("sceUtilityMsgDialogGetStatus")) { RET(dialog); if (dialog == 1) dialog = 2; else if (dialog == 4) dialog = 0; }
+    else if (IS("sceUtilityMsgDialogGetStatus")) RET(dialog_status(&dialog));
     else if (IS("sceUtilityMsgDialogUpdate")) { if (dialog == 2) dialog = 3; }
     else if (IS("sceUtilityMsgDialogShutdownStart")) dialog = 4;
     else if (IS("sceKernelGetSystemTimeLow") || IS("sceKernelLibcClock")) RET(now_us);
@@ -510,7 +536,7 @@ int main(int argc, char **argv) {
         if (pc == IDLE_PC) { th[cur].state = DONE; schedule(); continue; }
         if (pc == PUT_RETURN) {                         /* v0 is already its answer */
             p.pc = put_return[cur];
-            if ((s32)p.r[2] > 0) movie_frames += p.r[2] / 16;
+            mpeg_put_done((s32)p.r[2]);
             continue;
         }
         const u32 slot = (pc - CODE_BASE) >> 2;

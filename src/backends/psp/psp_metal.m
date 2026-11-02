@@ -203,14 +203,12 @@ static id<MTLDepthStencilState> depth_state(const MtlState *s) {
 }
 
 void mtl_texture(void **slot, int w, int h, int pitch, const uint32_t *rgba) {
-    id<MTLTexture> t = (__bridge id<MTLTexture>)*slot;
-    if (!t || (int)t.width != w || (int)t.height != h) {
-        if (*slot) CFRelease(*slot);
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:(NSUInteger)w height:(NSUInteger)h mipmapped:NO];
-        d.storageMode = MTLStorageModeShared;
-        t = [dev newTextureWithDescriptor:d];
-        *slot = (void *)CFBridgingRetain(t);
-    }
+    /* always a new one: draws already queued this frame may still need the old contents */
+    if (*slot) CFRelease(*slot);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:(NSUInteger)w height:(NSUInteger)h mipmapped:NO];
+    d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [dev newTextureWithDescriptor:d];
+    *slot = (void *)CFBridgingRetain(t);
     [t replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0 withBytes:rgba bytesPerRow:(NSUInteger)pitch * 4];
 }
 

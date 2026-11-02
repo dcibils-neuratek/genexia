@@ -456,7 +456,7 @@ static Vtx transform(const Raw *r, u32 vt, const Tex *t) {
         else if (src == 2 || src == 3) { memcpy(in, r->nrm, 12); if (src == 2) normalize3(in); }
         mul43(tgen, in, 1, tv);
         const float q = tv[2] != 0 ? tv[2] : 1;
-        o.u = tv[0] / q * tex_su + tex_ou; o.v = tv[1] / q * tex_sv + tex_ov;
+        o.u = tv[0] / q; o.v = tv[1] / q;          /* the matrix has the scale in it already */
     } else {                                      /* environment map from two lights */
         const int ls = ge[0xC1] & 3, lt = (ge[0xC1] >> 8) & 3;
         float a[3] = { f24(ge[0x63 + ls * 3]), f24(ge[0x64 + ls * 3]), f24(ge[0x65 + ls * 3]) }, b[3] = { f24(ge[0x63 + lt * 3]), f24(ge[0x64 + lt * 3]), f24(ge[0x65 + lt * 3]) };
