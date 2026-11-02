@@ -476,7 +476,7 @@ if map_file:
             ticker.append([i, '$%02X:%04X' % (c.pc >> 16, c.pc & 0xFFFF), hexes, c.c[:44]])
     edges = edges[::max(1, len(edges) // 2500)]
     with open(map_file, 'w') as f:
-        json.dump({'size': SZ, 'followed': known, 'offsets': [off(c.pc) for c in order], 'lengths': [c.n for c in order],
+        json.dump({'size': SZ, 'hirom': bool(hirom), 'followed': known, 'offsets': [off(c.pc) for c in order], 'lengths': [c.n for c in order],
                    'edges': edges, 'ticker': ticker}, f, separators=(',', ':'))
 if listing:
     with open(listing, 'w') as f:

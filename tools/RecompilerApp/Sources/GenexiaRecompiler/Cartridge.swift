@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// A small drawing of the console's cartridge: its shape, no logos.
+/// A drawing of the console's cartridge, no logos, with the game's art on its label.
 struct Cartridge: View {
     let console: String
+    var label: NSImage? = nil
+    var title: String? = nil        // printed on the label when the art doesn't carry a name
     var body: some View {
         Canvas { ctx, size in
             let u = min(size.width, size.height) / 24
@@ -19,13 +21,36 @@ struct Cartridge: View {
     }
 
     func sticker(_ ctx: GraphicsContext, _ r: CGRect, _ top: Color, _ bottom: Color) {
-        ctx.fill(Path(roundedRect: r, cornerRadius: 0.4), with: .linearGradient(Gradient(colors: [top, bottom]),
+        var c = ctx
+        c.clip(to: Path(roundedRect: r, cornerRadius: 0.4))
+        if let label, label.size.width > 0, label.size.height > 0 {
+            let k = max(r.width / label.size.width, r.height / label.size.height)
+            let w = label.size.width * k, h = label.size.height * k
+            c.draw(c.resolve(Image(nsImage: label)), in: CGRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h))
+        } else {
+            c.fill(Path(r), with: .linearGradient(Gradient(colors: [top, bottom]),
+                startPoint: CGPoint(x: r.minX, y: r.minY), endPoint: CGPoint(x: r.maxX, y: r.maxY)))
+        }
+        if let title {
+            let band = CGRect(x: r.minX, y: r.maxY - 2.6, width: r.width, height: 2.6)
+            c.fill(Path(band), with: .linearGradient(Gradient(colors: [.clear, .black.opacity(0.8)]),
+                startPoint: CGPoint(x: 0, y: band.minY), endPoint: CGPoint(x: 0, y: band.maxY)))
+            c.draw(Text(title).font(.system(size: 0.95, weight: .heavy, design: .rounded)).foregroundColor(.white),
+                   in: band.insetBy(dx: 0.4, dy: 0.5))
+        }
+        c.fill(Path(r), with: .linearGradient(Gradient(colors: [.white.opacity(0.16), .clear, .clear]),
             startPoint: CGPoint(x: r.minX, y: r.minY), endPoint: CGPoint(x: r.maxX, y: r.maxY)))
+    }
+
+    /// Moulded plastic: lit from above.
+    func light(_ ctx: GraphicsContext, _ shape: Path) {
+        ctx.fill(shape, with: .linearGradient(Gradient(colors: [.white.opacity(0.14), .clear, .black.opacity(0.28)]),
+                                              startPoint: CGPoint(x: 0, y: 3), endPoint: CGPoint(x: 0, y: 21)))
     }
 
     /// North American cartridge: wide and flat-topped, with ribbed side wings around a raised centre.
     func snes(_ ctx: GraphicsContext) {
-        let wing = Color(white: 0.42), edge = Color(white: 0.28), centre = Color(white: 0.5)
+        let wing = Color(white: 0.56), edge = Color(white: 0.38), centre = Color(white: 0.64)
         var body = Path()
         body.move(to: CGPoint(x: 1.6, y: 4.5))
         body.addLine(to: CGPoint(x: 22.4, y: 4.5))
@@ -41,6 +66,7 @@ struct Cartridge: View {
         body.addLine(to: CGPoint(x: 1, y: 5.1))
         body.closeSubpath()
         ctx.fill(body, with: .color(wing))
+        light(ctx, body)
         for y in stride(from: 7.0, through: 16.0, by: 2.25) {
             ctx.fill(Path(CGRect(x: 1, y: y, width: 3.8, height: 0.45)), with: .color(edge))
             ctx.fill(Path(CGRect(x: 19.2, y: y, width: 3.8, height: 0.45)), with: .color(edge))
@@ -53,7 +79,7 @@ struct Cartridge: View {
 
     /// Arched top, flat bottom, a recessed panel between two grooved wings.
     func n64(_ ctx: GraphicsContext) {
-        let shell = Color(white: 0.56), groove = Color(white: 0.36)
+        let shell = Color(white: 0.62), groove = Color(white: 0.4)
         var body = Path()
         body.move(to: CGPoint(x: 2.6, y: 20))
         body.addLine(to: CGPoint(x: 2.6, y: 18.8))
@@ -65,6 +91,7 @@ struct Cartridge: View {
         body.addLine(to: CGPoint(x: 21.4, y: 20))
         body.closeSubpath()
         ctx.fill(body, with: .color(shell))
+        light(ctx, body)
         var lines = Path()
         lines.move(to: CGPoint(x: 5.2, y: 5.3)); lines.addLine(to: CGPoint(x: 5.2, y: 20))
         lines.move(to: CGPoint(x: 18.8, y: 5.3)); lines.addLine(to: CGPoint(x: 18.8, y: 20))
@@ -75,7 +102,7 @@ struct Cartridge: View {
         panel.addQuadCurve(to: CGPoint(x: 17.6, y: 7.2), control: CGPoint(x: 12, y: 4.6))
         panel.addLine(to: CGPoint(x: 17.6, y: 18.6))
         panel.closeSubpath()
-        ctx.fill(panel, with: .color(Color(white: 0.5)))
+        ctx.fill(panel, with: .color(Color(white: 0.56)))
         ctx.stroke(panel, with: .color(groove), lineWidth: 0.3)
         sticker(ctx, CGRect(x: 7.4, y: 8, width: 9.2, height: 9.4), Color(red: 0.9, green: 0.75, blue: 0.2), Color(red: 0.8, green: 0.2, blue: 0.2))
     }
@@ -87,6 +114,7 @@ struct Cartridge: View {
         body.addRoundedRect(in: CGRect(x: 1.5, y: 3.2, width: 21, height: 8.8), cornerSize: CGSize(width: 1.4, height: 1.4))
         body.addRoundedRect(in: CGRect(x: 3.2, y: 10, width: 17.6, height: 11), cornerSize: CGSize(width: 1.2, height: 1.2))
         ctx.fill(body, with: .color(shell))
+        light(ctx, body)
         ctx.stroke(Path(roundedRect: CGRect(x: 1.5, y: 3.2, width: 21, height: 8.8), cornerRadius: 1.4), with: .color(line), lineWidth: 0.3)
         ctx.stroke(Path(roundedRect: CGRect(x: 3.2, y: 10, width: 17.6, height: 11), cornerRadius: 1.2), with: .color(line), lineWidth: 0.3)
         ctx.fill(Path(CGRect(x: 3.1, y: 18, width: 0.9, height: 0.9)), with: .color(line))

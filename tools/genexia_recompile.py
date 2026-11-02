@@ -129,7 +129,7 @@ def run(cmd, env=None, **kw):
 
 
 def play(tool, rom, frames, seed, miss, lib=None, interp=False, runner=0):
-    env = {'SF2_MISSLOG': miss} if miss else {}
+    env = {'SF2_MISSLOG': miss, 'SF2_PREVIEW': miss + '.ppm'} if miss else {}
     if not lib:
         env['SF2_NOGAMELIB'] = '1'
     if lib:

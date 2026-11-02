@@ -32,7 +32,9 @@ struct MainView: View {
             sidebar.frame(width: 280)
             Divider().opacity(0.3)
             ZStack {
-                if store.info == .how {
+                if store.info == .library {
+                    AllGames()
+                } else if store.info == .how {
                     HowItWorks()
                 } else if store.info == .systems {
                     Systems()
@@ -57,6 +59,15 @@ struct MainView: View {
                     .padding(8).allowsHitTesting(false)
             }
         }
+        .alert("Remove \(store.removing?.title.capitalized ?? "game")?", isPresented: Binding(get: { store.removing != nil }, set: { if !$0 { store.removing = nil } }), presenting: store.removing) { game in
+            Button("Remove Game", role: .destructive) { store.remove(game, saves: false) }
+            if !store.saves(for: game).isEmpty {
+                Button("Remove Game and Saves", role: .destructive) { store.remove(game, saves: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Its compiled code and found-code list go to the Trash, and it would have to be built again. Your ROM file and any packaged apps stay where they are.")
+        }
         .sheet(item: $store.packaging) { job in PackageSheet(job: job).environmentObject(store).interactiveDismissDisabled(!job.finished) }
         .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { items in
             for item in items {
@@ -77,6 +88,7 @@ struct MainView: View {
             }
             .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 10)
             VStack(spacing: 2) {
+                InfoButton(page: .library, title: "All Games", icon: "rectangle.stack.fill")
                 InfoButton(page: .how, title: "How It Works", icon: "sparkles.rectangle.stack")
                 InfoButton(page: .systems, title: "Systems", icon: "cpu")
             }.padding(.horizontal, 10).padding(.bottom, 8)
@@ -154,7 +166,7 @@ struct GameRow: View {
                     else if game.problem != nil { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
                     else { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
                 }.frame(width: 20)
-                Cartridge(console: game.console).frame(width: 28, height: 28)
+                store.cartridge(game).frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(game.title.capitalized).font(.system(size: 13, weight: .medium)).lineLimit(1)
                     ConsoleBadge(console: game.console)
@@ -169,7 +181,11 @@ struct GameRow: View {
             .padding(9)
             .background(store.selection == game.id && store.info == nil ? accent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 9))
             .contentShape(Rectangle())
-        }.buttonStyle(.plain)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Remove Game…", role: .destructive) { store.removing = game }.disabled(game.building || game.queued)
+        }
     }
 }
 
@@ -181,7 +197,7 @@ struct GameDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Cartridge(console: game.console).frame(width: 38, height: 38)
+                    store.cartridge(game).frame(width: 38, height: 38)
                     Text(game.title.capitalized).font(.system(size: 28, weight: .bold, design: .rounded)).lineLimit(1)
                     ConsoleBadge(console: game.console)
                     Spacer()
@@ -204,25 +220,24 @@ struct GameDetail: View {
     }
 
     @ViewBuilder var compileTab: some View {
-        StepStrip(game: game)
+        if game.building || game.instructions == 0 { StepStrip(game: game) }
         if game.building { BuildProgress(game: game) }
+        if game.building && game.step == "play" { BotScreens(game: game) }
         if let p = game.problem {
             Label(p, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         }
-        WaitingCard(game: game)
-        ExplorerView(explorer: store.explorer(for: game.id), building: game.building)
-        NativeBar(native: game.nativePercent, known: game.nativePercent > 0)
+        StatusCard(game: game)
+        if game.waiting > 0 || !game.isN64 { WaitingCard(game: game) }
+        ExplorerView(explorer: store.explorer(for: game.id), building: game.building, nativePercent: game.nativePercent, facts: store.facts(for: game))
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-            Stat(value: game.instructions.formatted(), label: "instructions compiled")
             if game.isN64 {
                 Stat(value: game.addresses.formatted(), label: "code addresses seen running")
             } else {
                 Stat(value: game.followed == 0 ? "–" : "\(game.followed * 100 / max(1, game.instructions))%", label: "seen running or followed")
                 Stat(value: game.guessed == 0 ? "–" : "\(game.guessed * 100 / max(1, game.instructions))%", label: "guessed, not yet reached")
             }
-            Stat(value: game.checkedBlocks == 0 ? "–" : compact(game.checkedBlocks), label: game.mismatches != 0 ? "\(game.mismatches) mismatches" : game.isN64 ? "frames matched the interpreter" : "blocks verified")
             Stat(value: size(game.libraryBytes), label: "Mac library")
             if !game.isN64 { Stat(value: size(game.os9Bytes), label: "iMac library") }
         }
@@ -252,6 +267,8 @@ struct GameDetail: View {
                 .disabled(game.building || game.queued || store.packaging != nil)
                 .help("Make an app of this game that runs on its own, for the Mac you choose")
             Button { store.reveal(game) } label: { Image(systemName: "folder") }.help("Show the library in Finder")
+            Button { store.removing = game } label: { Image(systemName: "trash") }
+                .disabled(game.building || game.queued).help("Remove this game from Genexia")
         }
         .padding(.horizontal, 28).padding(.vertical, 14)
     }
@@ -279,29 +296,131 @@ struct GameDetail: View {
 }
 
 /// Share of the game's CPU time in compiled code against the interpreter.
-struct NativeBar: View {
-    let native: Double
-    let known: Bool
+/// Where the game stands on its way to native code, in one look.
+struct StatusCard: View {
+    let game: Game
+
+    var compiled: Bool { game.instructions > 0 }
+    var verified: Bool { game.checkedBlocks > 0 && game.mismatches == 0 }
+    var measured: Bool { game.nativePercent > 0 }
+    var allNative: Bool { game.nativePercent >= 99.95 }
+
+    var headline: String {
+        if game.building { return "Building" }
+        if !compiled { return "Nothing compiled yet" }
+        if game.mismatches != 0 { return "Native code doesn't match yet" }
+        if !verified { return "Compiled, not verified yet" }
+        if allNative { return "Fully native so far" }
+        if game.nativePercent >= 99 { return "Almost fully native" }
+        return game.nativePercent >= 90 ? "Mostly native" : "Partly native"
+    }
+
+    var verifyText: String {
+        if game.mismatches != 0 { return "\(game.mismatches.formatted()) differences from the emulator" }
+        if !verified { return "Not checked against the emulator yet" }
+        return game.isN64 ? "\(game.checkedBlocks.formatted()) frames played the same as the emulator"
+                          : "\(game.checkedBlocks.formatted()) blocks gave the same result as the emulator"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(known ? String(format: "%.1f%% native", native) : "Not measured yet").font(.system(size: 17, weight: .semibold, design: .rounded))
-                Spacer()
-                if known { Text(String(format: "%.1f%% emulated", 100 - native)).font(.callout).foregroundStyle(.secondary) }
-            }
-            GeometryReader { g in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.orange.opacity(known ? 0.55 : 0.1))
-                    Capsule().fill(accent).frame(width: g.size.width * native / 100)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 18) {
+                NativeRing(percent: game.nativePercent)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(headline).font(.system(size: 19, weight: .bold, design: .rounded))
+                    StatusRow(state: compiled ? .done : .open,
+                              text: compiled ? "\(game.instructions.formatted()) instructions compiled" : "Nothing compiled yet")
+                    StatusRow(state: game.mismatches != 0 ? .bad : verified ? .done : .open, text: verifyText)
+                    StatusRow(state: !measured ? .open : allNative ? .done : .part,
+                              text: !measured ? "Not measured yet" : allNative ? "All play time so far runs native"
+                                  : String(format: "%.1f%% of play time runs native, %.1f%% on the emulator", game.nativePercent, 100 - game.nativePercent))
+                    StatusRow(state: .open, text: "Parts of the game the bots haven't reached")
                 }
-            }.frame(height: 10)
-            Text("Share of CPU time while bots play. It can change once real play reaches new areas.").font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            Text("Anything not compiled yet runs on the built-in emulator, so the game always works. Only playing it to the end can show all the code it has: bots rarely get that far, so play with recording on.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
-/// What playing has turned up that the library doesn't have yet.
+/// What each bot is seeing right now.
+struct BotScreens: View {
+    @EnvironmentObject var store: Store
+    let game: Game
+    @State private var screens: [CGImage] = []
+    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Bots playing").font(.headline)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                ForEach(screens.indices, id: \.self) { i in
+                    Image(decorative: screens[i], scale: 1).resizable().interpolation(.none).aspectRatio(4 / 3, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+        .onReceive(timer) { _ in screens = store.botScreens(game).compactMap(ppmImage) }
+    }
+}
+
+/// A binary PPM, the picture format the runtime writes.
+func ppmImage(_ url: URL) -> CGImage? {
+    guard let data = try? Data(contentsOf: url), data.count > 16, data.prefix(2) == Data("P6".utf8) else { return nil }
+    var at = data.startIndex + 2, numbers: [Int] = []
+    while numbers.count < 3 {
+        while at < data.endIndex, data[at] == 10 || data[at] == 32 { at += 1 }
+        var n = 0
+        while at < data.endIndex, data[at] >= 48, data[at] <= 57 { n = n * 10 + Int(data[at] - 48); at += 1 }
+        numbers.append(n)
+    }
+    at += 1
+    let w = numbers[0], h = numbers[1]
+    guard w > 0, h > 0, data.endIndex - at >= w * h * 3, let source = CGDataProvider(data: data.subdata(in: at..<(at + w * h * 3)) as CFData) else { return nil }
+    return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: w * 3, space: CGColorSpaceCreateDeviceRGB(),
+                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue), provider: source, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+}
+
+struct NativeRing: View {
+    let percent: Double
+    var body: some View {
+        ZStack {
+            Circle().stroke(.white.opacity(0.1), lineWidth: 10)
+            Circle().trim(from: 0, to: percent / 100).stroke(Color.green, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            VStack(spacing: 0) {
+                Text(percent > 0 ? String(format: "%.1f%%", percent) : "–").font(.system(size: 19, weight: .bold, design: .rounded)).monospacedDigit()
+                Text("native").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 104, height: 104).padding(5)
+        .animation(.easeOut(duration: 0.5), value: percent)
+    }
+}
+
+struct StatusRow: View {
+    enum State { case done, part, open, bad }
+    let state: State
+    let text: String
+    var body: some View {
+        Label {
+            Text(text).font(.callout)
+        } icon: {
+            switch state {
+            case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .part: Image(systemName: "circle.lefthalf.filled").foregroundStyle(.orange)
+            case .open: Image(systemName: "circle.dashed").foregroundStyle(.secondary)
+            case .bad: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+            }
+        }
+    }
+}
+
 struct WaitingCard: View {
     @EnvironmentObject var store: Store
     let game: Game
@@ -317,8 +436,10 @@ struct WaitingCard: View {
             }
             Spacer()
             if !game.isN64 { Button("Check iMac") { store.checkIMac(game) }.disabled(game.building || game.queued) }
-            Button("Compile") { store.rebuild(game) }
-                .buttonStyle(.borderedProminent).tint(.orange).disabled(game.waiting == 0 || game.building || game.queued)
+            if game.waiting > 0 {
+                Button("Compile") { store.rebuild(game) }
+                    .buttonStyle(.borderedProminent).tint(.orange).disabled(game.building || game.queued)
+            }
         }
         .padding(14)
         .background(game.waiting > 0 ? Color.orange.opacity(0.12) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))

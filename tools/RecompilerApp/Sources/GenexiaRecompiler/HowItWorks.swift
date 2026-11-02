@@ -63,6 +63,7 @@ struct HowItWorks: View {
                 StageCard(stage: stages[current])
                 GrowLoop()
                 InsideTheApp()
+                ModernTake()
                 Compare()
                 YourGames()
             }
@@ -376,6 +377,45 @@ struct YourGames: View {
 }
 
 /// Why this road and not the two obvious ones.
+/// What a game gains on the way, and which part of Genexia gives it.
+struct ModernTake: View {
+    let gains: [(icon: String, title: String, from: String, to: String, text: String)] = [
+        ("hare", "Speed", "Emulated", "Native", "Super Mario 64 reaches about 3.7x full speed, and the time saved pays for everything else here."),
+        ("square.resize.up", "Resolution", "320 x 240", "1280 x 960", "N64 3D is really drawn at up to 4x, with 32-bit colour in place of dithering."),
+        ("rectangle.expand.vertical", "Widescreen", "4:3", "16:9", "More of the scene, not a stretched picture. Super Mario Kart draws real extra track."),
+        ("circle.hexagongrid", "Anti-aliasing", "Jagged", "Smooth", "N64 edges are drawn at twice the size and averaged down."),
+        ("square.grid.3x3", "Pixel art", "Blocky", "Scale4x", "Genesis and SNES corners are rounded without inventing colours."),
+        ("desktopcomputer", "More machines", "One console", "Many Macs", "Apple silicon, Intel and PowerPC under Mac OS 9, each with code built for it.")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("A modern take on the original").font(.headline)
+                Text("Native code brings the speed. Genexia's rebuilt video and sound chips bring the rest, so the same game can look better and run on machines it never knew. Options vary by console.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                ForEach(gains, id: \.title) { g in
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label(g.title, systemImage: g.icon).font(.system(size: 13, weight: .semibold)).foregroundStyle(accent)
+                        HStack(spacing: 5) {
+                            Text(g.from).foregroundStyle(.secondary)
+                            Image(systemName: "arrow.right").font(.system(size: 9))
+                            Text(g.to).foregroundStyle(.green)
+                        }.font(.system(size: 12, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.8)
+                        Text(g.text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(11).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
 struct Compare: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

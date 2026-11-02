@@ -1346,6 +1346,11 @@ int main(int argc, char **argv) {
             vdp_skip_render = getenv("SF2_LIVELIKE") != NULL;   /* dev: as the window loop does */
             run_frame();
             vdp_skip_render = 0;
+            if (getenv("SF2_PREVIEW") && f % 60 == 0) {   /* the Recompiler shows bots at work */
+                char p[512]; snprintf(p, sizeof p, "%s.tmp", getenv("SF2_PREVIEW"));
+                save_ppm(p);
+                rename(p, getenv("SF2_PREVIEW"));
+            }
             if (getenv("SF2_HEADLESS_RA")) run_ahead_frames();
             if (getenv("SF2_STATEHASH") && f % atoi(getenv("SF2_STATEHASH")) == 0) {   /* dev: compare two runs */
                 static u8 *hb; if (!hb) hb = malloc(state_size());

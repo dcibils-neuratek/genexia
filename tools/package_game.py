@@ -38,6 +38,9 @@ SDL_X86 = ['/Applications/love.app/Contents/Frameworks/SDL2.framework/SDL2']
 SDL_LOCAL = os.path.join(REPO, 'build/x86_64/libSDL2-2.0.0.dylib')
 
 
+PSPDEV = os.path.expanduser('~/pspdev')
+
+
 def say(**e):
     print(json.dumps(e), flush=True)
 
@@ -88,12 +91,13 @@ def screenshot(rom, lib, d):
     return best
 
 
-def png(path, size, rgba):
+def png(path, size, rgba, height=None):
     def chunk(kind, body):
         return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
-    rows = b''.join(b'\0' + rgba[y * size * 4:(y + 1) * size * 4] for y in range(size))
+    height = height or size
+    rows = b''.join(b'\0' + rgba[y * size * 4:(y + 1) * size * 4] for y in range(height))
     with open(path, 'wb') as f:
-        f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0))
+        f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, height, 8, 6, 0, 0, 0))
                 + chunk(b'IDAT', zlib.compress(rows, 6)) + chunk(b'IEND', b''))
 
 
@@ -121,15 +125,18 @@ def icon_image(shot, size):
     return bytes(out)
 
 
-def make_icon(shot, target, d):
+def make_icon(shot, target, d, cartridge=None):
     iconset = os.path.join(d, 'game.iconset')
     os.makedirs(iconset)
     for size, names in ((16, ['16x16']), (32, ['16x16@2x', '32x32']), (64, ['32x32@2x']),
                         (128, ['128x128']), (256, ['128x128@2x', '256x256']),
                         (512, ['256x256@2x', '512x512'])):
-        image = icon_image(shot, size)
         for n in names:
-            png(os.path.join(iconset, f'icon_{n}.png'), size, image)
+            file = os.path.join(iconset, f'icon_{n}.png')
+            if cartridge:
+                must(['sips', '-z', str(size), str(size), cartridge, '--out', file])
+            else:
+                png(file, size, icon_image(shot, size))
     must(['iconutil', '-c', 'icns', '-o', target, iconset])
 
 
@@ -175,6 +182,53 @@ def intel_library(d, console):
     lib = os.path.join(objdir, 'game.dylib')
     must(['clang'] + X86 + ['-dynamiclib', '-Wl,-exported_symbol,_genexia_game', '-o', lib] + objs)
     return lib
+
+
+def package_psp(info, game, name, out, d):
+    """A folder for PSP/GAME on a memory stick: the game's native code in the EBOOT, the ROM beside it."""
+    if info['console'] != 'SNES':
+        fail('Only SNES games can be built for the PSP so far.')
+    if not os.path.exists(os.path.join(PSPDEV, 'bin/psp-gcc')):
+        fail('The PSP compiler is missing: it belongs in ~/pspdev.')
+    must(['make', '-j8', 'genexia-runtime'])
+    work = tempfile.mkdtemp(prefix='genexia-package')
+    try:
+        os.symlink(d, os.path.join(work, 'game'))      # make can't take a path with spaces
+        icon = os.path.join(work, 'ICON0.PNG')
+        cartridge = os.path.join(d, 'cartridge.png')
+        shot = None if os.path.exists(cartridge) else screenshot(info['rom'], os.path.join(d, 'game.dylib'), work)
+        if not shot and os.path.exists(cartridge):
+            square = os.path.join(work, 'square.png')
+            must(['sips', '-z', '80', '80', cartridge, '--out', square])
+            must(['sips', '-p', '80', '144', '--padColor', '000000', square, '--out', icon])
+        elif shot:
+            w, h, px = read_ppm(shot)
+            image = bytearray()
+            for y in range(80):
+                for x in range(144):
+                    s = (y * h // 80 * w + x * w // 144) * 3
+                    image += px[s:s + 3] + b'\xff'
+            png(icon, 144, bytes(image), 80)
+        else:
+            open(icon, 'wb').close()
+        say(event='packaging', id='compile')
+        build = os.path.join(work, 'out')
+        must(['make', '-j8', '-f', os.path.join(REPO, 'src/platforms/psp/Makefile'), 'GAME=' + os.path.join(work, 'game'),
+              'OUT=' + build, 'ICON=' + icon, 'TITLE=' + re.sub(r"['\"$`\\\\]", '', name)])
+        size = run([os.path.join(PSPDEV, 'bin/psp-size'), os.path.join(d, 'obj-psp/game.elf')]).stdout.split('\n')[1].split()
+        memory = int(size[3]) - 0x600000 + os.path.getsize(info['rom'])
+        if memory > 52 << 20:
+            fail('This game needs %d MB and a PSP has at most 64.' % (memory >> 20))
+        say(event='packaging', id='assemble')
+        shutil.copy(info['rom'], os.path.join(build, 'game.rom'))
+        folder = os.path.join(out, name + ' (PSP)')
+        os.makedirs(out, exist_ok=True)
+        shutil.rmtree(folder, ignore_errors=True)
+        shutil.move(build, folder)
+        say(event='packaged', app=folder, name=name + (' (needs a PSP-2000 or later)' if memory > 22 << 20 else ''),
+            bytes=sum(os.path.getsize(os.path.join(folder, f)) for f in os.listdir(folder)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def package_ppc(info, game, name, out):
@@ -228,7 +282,7 @@ def main():
     for k, v in zip(a[1::2], a[2::2]):
         if k == '--out':
             out = v
-        elif k == '--target' and v in ('arm', 'intel', 'ppc'):
+        elif k == '--target' and v in ('arm', 'intel', 'ppc', 'psp'):
             target = v
         else:
             sys.exit('bad option ' + k)
@@ -248,6 +302,8 @@ def main():
     name = app_name(info)
     if target == 'ppc':
         return package_ppc(info, game, name, out)
+    if target == 'psp':
+        return package_psp(info, game, name, out, d)
     say(event='packaging', id='runtime')
     must(['make', '-j8', 'genexia-runtime'])
     if intel:
@@ -265,9 +321,11 @@ def main():
         res = os.path.join(new, 'Contents/Resources')
         os.makedirs(res)
         os.makedirs(os.path.join(new, 'Contents/MacOS'))
-        shot = screenshot(info['rom'], lib, work)
-        if shot:
-            make_icon(shot, os.path.join(res, 'game.icns'), work)
+        cartridge = os.path.join(d, 'cartridge.png')       # drawn by the Recompiler
+        cartridge = cartridge if os.path.exists(cartridge) else None
+        shot = None if cartridge else screenshot(info['rom'], lib, work)
+        if cartridge or shot:
+            make_icon(shot, os.path.join(res, 'game.icns'), work, cartridge)
 
         say(event='packaging', id='assemble')
         shutil.copy(RUNTIME_X86 if intel else RUNTIME, os.path.join(new, 'Contents/MacOS/genexia'))
@@ -291,7 +349,7 @@ def main():
                 'LSMinimumSystemVersion': '10.15' if intel else '11.0',
                 'NSHighResolutionCapable': True,
             }
-            if shot:
+            if cartridge or shot:
                 plist['CFBundleIconFile'] = 'game'
             plistlib.dump(plist, f)
         must(['codesign', '--force', '-s', '-', '--deep', new])

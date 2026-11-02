@@ -48,7 +48,7 @@ let buildSteps: [(id: String, title: String, icon: String)] = [
     ("os9", "iMac library", "desktopcomputer"),
 ]
 
-enum InfoPage { case how, systems }
+enum InfoPage { case library, how, systems }
 
 enum GameTab { case compile, play }
 
@@ -78,22 +78,30 @@ struct PackageJob: Identifiable {
 
 /// The machines a game can be packaged for.
 enum PackageTarget: String, CaseIterable, Identifiable {
-    case arm, intel, ppc
+    case arm, intel, ppc, psp
     var id: String { rawValue }
     var title: String {
         switch self {
         case .arm: return "Mac Apple Silicon"
         case .intel: return "Mac Intel"
         case .ppc: return "Mac PowerPC: Mac OS 9 disk for G3, G4 (G5 in Classic)"
+        case .psp: return "Sony PSP: folder for PSP/GAME, SNES games"
         }
     }
-    func available(_ g: Game) -> Bool { self != .ppc || g.os9Library != nil }
+    func available(_ g: Game) -> Bool {
+        switch self {
+        case .ppc: return g.os9Library != nil
+        case .psp: return g.console == "SNES"
+        default: return true
+        }
+    }
     var steps: [(id: String, title: String, icon: String)] {
         switch self {
         case .arm: return [("runtime", "Build the emulators", "cpu"), ("icon", "Make the icon", "photo"), ("assemble", "Put the app together", "shippingbox")]
         case .intel: return [("runtime", "Build the Intel emulators", "cpu"), ("compile", "Compile the game for Intel", "hammer"), ("link", "Link its library", "link"),
                              ("icon", "Make the icon", "photo"), ("assemble", "Put the app together", "shippingbox")]
         case .ppc: return [("runtime", "Build the Mac OS 9 emulators", "cpu"), ("disk", "Write the disk", "opticaldisc")]
+        case .psp: return [("compile", "Compile the game and chips for PSP", "hammer"), ("assemble", "Put the folder together", "shippingbox")]
         }
     }
 }
@@ -137,7 +145,10 @@ final class Store: ObservableObject {
     @Published var selection: String?
     @Published var banner: String?
     @Published var packaging: PackageJob?
-    @Published var info: InfoPage?
+    @Published var info: InfoPage? = .library
+    @Published var art: [String: NSImage] = [:]      // box art, or a label someone chose
+    @Published var shots: [String: NSImage] = [:]    // a moment of the game itself
+    @Published var removing: Game?
     @Published var tab = GameTab.compile
     @AppStorage("imacHost") var imacHost = "192.168.1.38"
 
@@ -154,7 +165,7 @@ final class Store: ObservableObject {
     init() {
         reload()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.countWaiting() }
+            Task { @MainActor in self?.countWaiting(); self?.fetchArt() }
         }
     }
 
@@ -168,8 +179,11 @@ final class Store: ObservableObject {
         for i in games.indices where !games[i].building && !games[i].id.hasPrefix("drop-") {
             let d = gamesDir.appendingPathComponent(games[i].id)
             let played = addresses(d.appendingPathComponent("recorded.txt")).union(addresses(d.appendingPathComponent("imac-recorded.txt")))
-            let n = played.isEmpty ? 0 : played.subtracting(addresses(d.appendingPathComponent("coverage.txt"))).count
-            if games[i].waiting != n { games[i].waiting = n }
+            let new = played.isEmpty ? [] : played.subtracting(addresses(d.appendingPathComponent("coverage.txt")))
+            if games[i].waiting != new.count {
+                games[i].waiting = new.count
+                explorer(for: games[i].id).setWaiting(Array(new))
+            }
         }
     }
 
@@ -217,6 +231,7 @@ final class Store: ObservableObject {
         }
         games = found.sorted { $0.title < $1.title }
         countWaiting()
+        for g in games { loadArt(g.id) }
     }
 
     private func update(_ id: String, _ change: (inout Game) -> Void) {
@@ -232,6 +247,7 @@ final class Store: ObservableObject {
             g.status = "building"
             games.append(g)
             selection = key
+            info = nil
             queue.append(key)
             next()
         }
@@ -280,6 +296,9 @@ final class Store: ObservableObject {
                 g.progressDone = e["done"] as? Int ?? 0
                 g.progressTotal = e["total"] as? Int ?? 0
             }
+            if e["label"] as? String == "Compiling", let done = e["done"] as? Int, let total = e["total"] as? Int, total > 0 {
+                explorer(for: live).compiling(Double(done) / Double(total))
+            }
         case "timing":
             update(live) { g in g.log.append("\(e["detail"] ?? ""): \(e["seconds"] ?? 0) s") }
         case "inspected":
@@ -320,6 +339,7 @@ final class Store: ObservableObject {
             }
         case "done":
             update(live) { g in if !g.step.isEmpty { g.done.insert(g.step) }; g.log.append("Finished in \(e["seconds"] ?? 0) s") }
+            explorer(for: live).compiling(1)
         case "failed":
             update(live) { g in g.problem = e["message"] as? String }
         default: break
@@ -331,8 +351,24 @@ final class Store: ObservableObject {
         if let x = explorers[id] { return x }
         let x = RomExplorer()
         explorers[id] = x
-        x.load(gamesDir.appendingPathComponent(id).appendingPathComponent("map.json"), instant: true)
+        x.load(gamesDir.appendingPathComponent(id).appendingPathComponent("map.json"), instant: true,
+               native: (games.first { $0.id == id }?.instructions ?? 0) > 0)
         return x
+    }
+
+    private var factsCache: [String: [RomFact]] = [:]
+    func facts(for game: Game) -> [RomFact] {
+        if let f = factsCache[game.id] { return f }
+        let f = romFacts(path: game.romPath, console: game.console)
+        if !f.isEmpty { factsCache[game.id] = f }
+        return f
+    }
+
+    /// The latest picture from each bot while the bots play.
+    func botScreens(_ game: Game) -> [URL] {
+        let tmp = gamesDir.appendingPathComponent(game.id).appendingPathComponent("tmp")
+        let all = (try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
+        return all.filter { $0.pathExtension == "ppm" }.sorted { $0.path < $1.path }
     }
 
     func setOptions(_ game: Game, _ options: GameOptions) {
@@ -348,9 +384,68 @@ final class Store: ObservableObject {
         NSWorkspace.shared.open(gamesDir.appendingPathComponent(game.id))
     }
 
+    private func loadArt(_ id: String) {
+        let d = gamesDir.appendingPathComponent(id)
+        art[id] = NSImage(contentsOf: d.appendingPathComponent("art.png"))
+        shots[id] = NSImage(contentsOf: d.appendingPathComponent("shot.png"))
+    }
+
+    private var fetchingArt = false
+    private var artTried: Set<String> = []
+    /// Gets each finished game its pictures, one at a time.
+    func fetchArt() {
+        guard !fetchingArt, let g = games.first(where: { g in
+            let d = gamesDir.appendingPathComponent(g.id).path
+            let fm = FileManager.default
+            return !g.building && !g.queued && g.instructions > 0 && !artTried.contains(g.id)
+                && (!fm.fileExists(atPath: d + "/shot.png") || !fm.fileExists(atPath: d + "/art.png") && !fm.fileExists(atPath: d + "/art.none"))
+        }) else { return }
+        fetchingArt = true
+        artTried.insert(g.id)
+        run(["python3", repo + "/tools/game_art.py", g.id], onLine: { _ in }) { [weak self] _ in
+            self?.fetchingArt = false
+            self?.loadArt(g.id)
+        }
+    }
+
+    func setArt(_ game: Game, from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let image = NSImage(contentsOf: url), let tiff = image.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+            banner = "That file isn't a picture Genexia can read."
+            return
+        }
+        try? png.write(to: gamesDir.appendingPathComponent(game.id).appendingPathComponent("art.png"))
+        loadArt(game.id)
+    }
+
+    /// The label goes back to a moment of the game itself.
+    func clearArt(_ game: Game) {
+        let d = gamesDir.appendingPathComponent(game.id)
+        try? FileManager.default.removeItem(at: d.appendingPathComponent("art.png"))
+        FileManager.default.createFile(atPath: d.appendingPathComponent("art.none").path, contents: nil)
+        loadArt(game.id)
+    }
+
+    func cartridge(_ game: Game, big: Bool = false) -> Cartridge {
+        Cartridge(console: game.console, label: art[game.id] ?? shots[game.id],
+                  title: big && art[game.id] == nil && shots[game.id] != nil ? game.title.capitalized : nil)
+    }
+
+    /// The app icon is the game's cartridge. package_game.py picks this file up.
+    private func writeIcon(_ game: Game) {
+        guard art[game.id] != nil || shots[game.id] != nil else { return }
+        let r = ImageRenderer(content: cartridge(game, big: true).frame(width: 1024, height: 1024))
+        guard let tiff = r.nsImage?.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: gamesDir.appendingPathComponent(game.id).appendingPathComponent("cartridge.png"))
+    }
+
     /// Makes a game that runs on its own: emulators, ROM and native code together.
     func package(_ game: Game, for target: PackageTarget) {
         packaging = PackageJob(title: game.title.capitalized, target: target)
+        writeIcon(game)
         run(["python3", repo + "/tools/package_game.py", game.id, "--target", target.rawValue], onLine: { [weak self] line in
             guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
             if let id = e["id"] as? String {
@@ -381,6 +476,25 @@ final class Store: ObservableObject {
             guard let d = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
             return GameSave(url: url, title: title, detail: detail, icon: icon, date: d)
         }
+    }
+
+    /// To the Trash, not gone: a game can take a long time to build again.
+    func remove(_ game: Game, saves withSaves: Bool) {
+        guard !game.building, !game.queued else { return }
+        let fm = FileManager.default
+        let trash = (withSaves ? saves(for: game).map(\.url) : []) + [gamesDir.appendingPathComponent(game.id)]
+        for url in trash where fm.fileExists(atPath: url.path) {
+            do { try fm.trashItem(at: url, resultingItemURL: nil) } catch {
+                banner = "Couldn't remove \(game.title): \(error.localizedDescription)"
+                return
+            }
+        }
+        games.removeAll { $0.id == game.id }
+        explorers[game.id] = nil
+        factsCache[game.id] = nil
+        art[game.id] = nil
+        shots[game.id] = nil
+        if selection == game.id { selection = games.first?.id }
     }
 
     func sendToIMac(_ game: Game) {
