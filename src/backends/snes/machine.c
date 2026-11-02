@@ -652,4 +652,4 @@ void snes_reset(void) {
     w65_reset();
 }
 
-const u8 *snes_sram(u32 *size) { *size = sram_mask + 1; return sram; }
+u8 *snes_sram(u32 *size) { *size = sram_mask + 1; return sram; }

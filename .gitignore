@@ -25,6 +25,8 @@ SF2.app/
 *.ppm
 .DS_Store
 genexia-lockstep
+genexia-runtime
+*.app/
 genexia-n64c
 genexia-n64l
 genexia-n64gl

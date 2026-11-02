@@ -192,6 +192,9 @@ struct GameDetail: View {
                     .disabled(game.building || game.queued)
                     .help("Keeps everything found so far, adds iMac recordings, sends the bots to play again, recompiles and re-verifies")
                 Spacer()
+                Button { store.package(game) } label: { Label("Package App", systemImage: "shippingbox") }
+                    .disabled(game.building || game.queued || store.packaging != nil)
+                    .help("Make a Mac app of this game that runs on its own")
                 Button { store.reveal(game) } label: { Image(systemName: "folder") }.help("Show the library in Finder")
             }
             .padding(.horizontal, 28).padding(.vertical, 14)

@@ -4,6 +4,7 @@
 #   make recompile  regenerate recomps/genesis/sf2 from the ROM and its coverage list
 #   make coverage   run the game headless and append newly found entry points
 #   make app        build Genexia.app bundle
+#   make genexia-runtime  the emulators alone, for packaged games
 #   make tests      build and run component tests
 
 ROM      ?= Street Fighter 2 Plus Champion Edition (J) [!].bin
@@ -56,6 +57,11 @@ $(BUILD)/core/main.o: $(BUILD)/version.h
 
 genexia: $(OBJS)
 	$(CC) -o $@ $(OBJS) $(SDL_LD) -lm
+
+# The emulators with no game inside, for packaged games: tools/package_game.py
+RT_OBJS := $(filter-out $(BUILD)/gen/% $(BUILD)/core/rom_embed.o $(BUILD)/rom_embed_data.o,$(OBJS))
+genexia-runtime: $(sort $(RT_OBJS) $(BUILD)/core/rom_none.o $(BUILD)/core/no_games.o)
+	$(CC) -o $@ $^ $(SDL_LD) -lm
 
 HDRS     := $(wildcard src/*.h src/*/*.h src/backends/*/*.h)
 $(BUILD)/%.o: src/%.c $(HDRS)

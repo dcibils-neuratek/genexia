@@ -51,6 +51,7 @@ typedef struct {
 typedef void (*SnesGameEntry)(const SnesEnv *);
 extern SnesGameEntry snes_game_lib;
 u32 snes_rom_crc(void);               /* names the game's library */
+u8  *snes_sram(u32 *size);
 #ifdef GAME_LIB
 extern SnesEnv genv;
 #define w65 (*genv.cpu)

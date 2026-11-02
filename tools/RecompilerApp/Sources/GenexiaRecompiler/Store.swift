@@ -80,6 +80,7 @@ final class Store: ObservableObject {
     @Published var games: [Game] = []
     @Published var selection: String?
     @Published var banner: String?
+    @Published var packaging: String?
     @AppStorage("imacHost") var imacHost = "192.168.1.38"
 
     private var queue: [String] = []
@@ -277,6 +278,29 @@ final class Store: ObservableObject {
 
     func reveal(_ game: Game) {
         NSWorkspace.shared.open(gamesDir.appendingPathComponent(game.id))
+    }
+
+    /// Makes a double-clickable app of the game: emulators, ROM and native code together.
+    func package(_ game: Game) {
+        banner = "Packaging \(game.title)…"
+        packaging = game.id
+        var app: String?
+        var problem: String?
+        run(["python3", repo + "/tools/package_game.py", game.id], onLine: { [weak self] line in
+            guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
+            if let s = e["step"] as? String { self?.banner = s + "…" }
+            if let a = e["app"] as? String { app = a }
+            if let m = e["message"] as? String { problem = m }
+        }) { [weak self] code in
+            self?.packaging = nil
+            if code == 0, let app {
+                let url = URL(fileURLWithPath: app)
+                self?.banner = "\(url.deletingPathExtension().lastPathComponent) is ready in Applications › Genexia Games."
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else {
+                self?.banner = problem ?? "Packaging \(game.title) failed."
+            }
+        }
     }
 
     func sendToIMac(_ game: Game) {

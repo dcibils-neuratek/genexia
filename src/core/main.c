@@ -495,6 +495,9 @@ static int load_rom(const char *path) {
 /* Which game is this? The generated code and the SF2 enhancements only
  * apply to that exact ROM; anything else runs on the interpreter. */
 static char game_title[64];
+/* Set when running from a packaged game's app: Resources holds its ROM, library
+ * and options, and everything it writes goes to pack_save, never into the bundle. */
+static char pack_dir[1024], pack_save[1100];
 static void reset_genesis(void);
 static void reset_snes(void) { vdp_init(); snes_reset(); }
 static const Backend backend_genesis = { "Genesis", YM_SAMPLE_RATE, 4.0, reset_genesis, run_frame_genesis };
@@ -531,8 +534,9 @@ static void configure_game(int region_set) {
                              : !strcmp(game_title, "DONKEY KONG COUNTRY") && rom[0xFFDE] == 0xCC && rom[0xFFDF] == 0x2B
                              ? recomp_register_dkc : NULL;
         /* a library from the Genexia Recompiler beats code built into the app */
-        char lib_path[512] = "";
+        char lib_path[1200] = "";
         if (getenv("SF2_GAMELIB")) snprintf(lib_path, sizeof lib_path, "%s", getenv("SF2_GAMELIB"));
+        else if (pack_dir[0]) snprintf(lib_path, sizeof lib_path, "%sgame.dylib", pack_dir);
         else if (getenv("HOME") && !getenv("SF2_NOGAMELIB"))
             snprintf(lib_path, sizeof lib_path, "%s/Library/Application Support/Genexia/games/%08X/game.dylib", getenv("HOME"), snes_rom_crc());
         snes_game_lib = NULL;
@@ -1128,6 +1132,20 @@ static const GameEntry *game_select(const char *argv0, int scale) {
 
 static void on_signal(int s) { (void)s; quit_req = 1; }
 
+/* a packaged game keeps its cartridge's battery save, read at start, written on quit */
+static void battery_file(int write) {
+    char p[1200];
+    u32 size;
+    u8 *ram = snes_sram(&size);
+    if (!pack_save[0] || be != &backend_snes || size <= 1) return;
+    snprintf(p, sizeof p, "%sbattery.srm", pack_save);
+    FILE *f = fopen(p, write ? "wb" : "rb");
+    if (!f) return;
+    if (write) fwrite(ram, 1, size, f);
+    else if (fread(ram, 1, size, f) != size) fprintf(stderr, "Battery save is the wrong size\n");
+    fclose(f);
+}
+
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--version")) { printf("Genexia build %s\n", GENEXIA_BUILD); return 0; }
@@ -1193,6 +1211,14 @@ int main(int argc, char **argv) {
         }
         else rom_path = argv[i];
     }
+    if (!rom_path) {
+        static char packed[1100];
+        char *base = SDL_GetBasePath();
+        struct stat st;
+        if (base) snprintf(packed, sizeof packed, "%sgame.rom", base);
+        if (base && !stat(packed, &st)) { snprintf(pack_dir, sizeof pack_dir, "%s", base); rom_path = packed; }
+        SDL_free(base);
+    }
     if (SDL_Init(headless ? 0 : (SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER)) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -1221,9 +1247,10 @@ int main(int argc, char **argv) {
     vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
     vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);
     if (!headless && be == &backend_snes && getenv("HOME")) {    /* set per game in the Genexia Recompiler */
-        char p[512], k[32];
+        char p[1200], k[32];
         int v;
-        snprintf(p, sizeof p, "%s/Library/Application Support/Genexia/games/%08X/options.txt", getenv("HOME"), snes_rom_crc());
+        if (pack_dir[0]) snprintf(p, sizeof p, "%soptions.txt", pack_dir);
+        else snprintf(p, sizeof p, "%s/Library/Application Support/Genexia/games/%08X/options.txt", getenv("HOME"), snes_rom_crc());
         FILE *o = fopen(p, "r");
         if (o) {
             settings_path[0] = 0;              /* this run's choices aren't the player's defaults */
@@ -1233,12 +1260,12 @@ int main(int argc, char **argv) {
                 else if (!strcmp(k, "sprites")) vdp_no_sprite_limit = v;
                 else if (!strcmp(k, "runahead")) runahead = v % 3;
                 else if (!strcmp(k, "speed")) set_speed(v);
-                else if (!strcmp(k, "record")) snes_recording = v;
+                else if (!strcmp(k, "record")) snes_recording = v && !pack_dir[0];
             }
             fclose(o);
         }
     }
-    if (be == &backend_snes && (!headless || getenv("SF2_RECORD_TEST")) && getenv("HOME") && !getenv("SF2_MISSLOG")) {
+    if (be == &backend_snes && !pack_dir[0] && (!headless || getenv("SF2_RECORD_TEST")) && getenv("HOME") && !getenv("SF2_MISSLOG")) {
         char dir[440];                         /* a built game grows from being played */
         snprintf(dir, sizeof dir, "%s/Library/Application Support/Genexia/games/%08X", getenv("HOME"), snes_rom_crc());
         struct stat st;
@@ -1246,13 +1273,20 @@ int main(int argc, char **argv) {
     }
     power_on();
     if (wav) wav_open(wav);
+    if (pack_dir[0]) {
+        char id[16], *pref;
+        snprintf(id, sizeof id, "%08X", snes_rom_crc());
+        if ((pref = SDL_GetPrefPath("Genexia", id))) { snprintf(pack_save, sizeof pack_save, "%s", pref); SDL_free(pref); }
+        battery_file(0);
+    }
     /* save-state slot: next to the ROM file, or in Application Support when built in */
     static char state_path[4200];
     if (embedded) {
         char *pref = headless ? NULL : SDL_GetPrefPath("Genexia", "Genexia");
         snprintf(state_path, sizeof state_path, "%ssf2.state", pref ? pref : "");
         SDL_free(pref);
-    } else snprintf(state_path, sizeof state_path, "%s.state", rom_path);
+    } else if (pack_save[0]) snprintf(state_path, sizeof state_path, "%sgame.state", pack_save);
+    else snprintf(state_path, sizeof state_path, "%s.state", rom_path);
 
     int state_at = getenv("SF2_STATE_AT") ? atoi(getenv("SF2_STATE_AT")) : 0;
     u8 *st_buf = NULL; unsigned st_monkey = 0; u64 st_h1 = 0, st_h2 = 0; int st_pass = 0;
@@ -1675,7 +1709,8 @@ int main(int argc, char **argv) {
         }
         if (speed_pct != last_speed) {
             char title[128];
-            snprintf(title, sizeof title, "Genexia build %s  -  %s  -  F10 options%s", GENEXIA_BUILD, game_title, speed_pct == 100 ? "" : "  -  speed");
+            if (pack_dir[0]) snprintf(title, sizeof title, "%s  -  F10 options%s", game_title, speed_pct == 100 ? "" : "  -  speed");
+            else snprintf(title, sizeof title, "Genexia build %s  -  %s  -  F10 options%s", GENEXIA_BUILD, game_title, speed_pct == 100 ? "" : "  -  speed");
             if (speed_pct != 100) snprintf(title + strlen(title), sizeof title - strlen(title), " %d%%", speed_pct);
             if (runahead != 1)
                 snprintf(title + strlen(title), sizeof title - strlen(title), "  -  run-ahead %d", runahead);
@@ -1723,6 +1758,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%.2f fps over %llu frames\n",
                 nframes / ((double)(SDL_GetPerformanceCounter() - t_start) / freq), (unsigned long long)nframes);
     }
+    battery_file(1);
     settings_save();
     wav_close();
     SDL_Quit();
