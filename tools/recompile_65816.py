@@ -10,6 +10,11 @@ code is found by following static control flow, and each basic block becomes a
 C function looked up by the runtime dispatcher. The difference is the CPU's
 mode flags: an immediate's size depends on M and X, so every block belongs to a
 (pc, mx) pair, and REP/SEP are tracked along each path.
+
+Past that, candidates are guessed: jump tables, the code after PLP, and routines
+sitting after the end of a known one. A wrong guess costs only code size. A block
+runs only when the CPU is at exactly that (pc, mx), and ROM can't change, so what
+it does is right whether or not the guess was.
 """
 import os
 import sys
@@ -62,19 +67,15 @@ def rb(pc):
 
 
 # instruction lengths; 'm' / 'x' depend on the mode flags
-L = ("2222222213113334" "2222222213113334"
-     "3242222213113334" "2222222213113334"
-     "1223222213113334" "2223222213113434"  # 5C is 4
-     "1323222213113334" "2222222213113334"
-     "2323222213113334" "2222222213113334"
-     "x2x2222213113334" "2222222213113334"
-     "x222222213113334" "2222222213113334"
-     "x222222213113334" "2222322213113334")
-L = list(L)
+COLUMN = [2, 2, 2, 2, 2, 2, 2, 2, 1, 3, 1, 1, 3, 3, 3, 4]
+L = [COLUMN[op & 15] for op in range(256)]
+L[0x20] = L[0x44] = L[0x54] = L[0x62] = L[0x82] = L[0xF4] = 3
+L[0x40] = L[0x60] = 1
+L[0x22] = L[0x5C] = 4
 for op in (0x09, 0x29, 0x49, 0x69, 0x89, 0xA9, 0xC9, 0xE9):
     L[op] = 'm'
-L[0x20] = '3'; L[0x22] = '4'; L[0x5C] = '4'; L[0x4C] = '3'; L[0x82] = '3'; L[0x62] = '3'
-L[0x44] = L[0x54] = '3'; L[0xF4] = '3'; L[0xD4] = '2'; L[0x6C] = L[0x7C] = L[0xDC] = L[0xFC] = '3'
+for op in (0xA0, 0xA2, 0xC0, 0xE0):
+    L[op] = 'x'
 
 
 def length(op, mx):
@@ -83,7 +84,7 @@ def length(op, mx):
         return 2 if mx & 2 else 3
     if c == 'x':
         return 2 if mx & 1 else 3
-    return int(c)
+    return c
 
 
 ALU = {0x00: 'ora', 0x20: 'and', 0x40: 'eor', 0x60: 'adc', 0x80: 'sta', 0xA0: 'lda', 0xC0: 'cmp', 0xE0: 'sbc'}
@@ -145,6 +146,7 @@ def decode(pc, mx):
     if any(v is None for v in ops):
         return None
     c = Ins(); c.pc, c.mx, c.op, c.n, c.targets, c.flow, c.mx_after, c.tail, c.cond = pc, mx, op, n, [], None, mx, None, None
+    c.more = []
     bank = pc & 0xFF0000
     nxt = bank | ((pc + n) & 0xFFFF)
     c.next = nxt
@@ -195,6 +197,10 @@ def decode(pc, mx):
     elif op in END:
         c.flow = 'end'
         c.c = 'w65.pc = 0x%04X; w65_exec();' % (pc & 0xFFFF)
+        if op in (0x44, 0x54, 0xCB):     # block moves and WAI come back to the next instruction
+            c.more = [(nxt, mx)]
+        elif op == 0xFB:                 # XCE into native mode starts with 8-bit registers
+            c.more = [(nxt, 3)]
     elif op in (0xC2, 0xE2):
         bits = (ops[0] >> 4) & 3          # P bit5=M, bit4=X -> mx bits 1,0
         c.mx_after = (mx & ~bits) if op == 0xC2 else (mx | bits)
@@ -248,24 +254,126 @@ for ef in entry_files:
             if len(p) == 2:
                 entries.add((int(p[0], 16), int(p[1])))
 ins, starts, work = {}, set(entries), list(entries)
-while work:
-    pc, mx = work.pop()
-    while True:
-        k = (pc, mx)
-        if k in ins:
-            break
-        c = decode(pc, mx)
-        if c is None or c.op in STOP_PATH and k not in entries:
-            break
-        ins[k] = c
+BAD = {0x00, 0x02, 0x42, 0xDB}       # BRK, COP, WDM and STP don't appear in real code paths
+
+
+def walk():
+    while work:
+        pc, mx = work.pop()
+        while True:
+            k = (pc, mx)
+            if k in ins:
+                break
+            c = decode(pc, mx)
+            if c is None or c.op in STOP_PATH and k not in entries:
+                break
+            ins[k] = c
+            for t in c.targets + c.more:
+                if off(t[0]) is not None:
+                    starts.add(t); work.append(t)
+            if c.flow in ('jump', 'end'):
+                break
+            if c.flow in ('branch', 'call'):
+                starts.add((c.next, c.mx_after))
+            pc, mx = c.next, c.mx_after
+
+
+def plausible(k0):
+    """does every path from here decode as code, as far as the known code or a return?"""
+    seen, todo = set(), [k0]
+    while todo:
+        k = todo.pop()
+        if k in ins or k in seen:
+            continue
+        if len(seen) > 3000:
+            return False
+        c = decode(*k)
+        if c is None or c.op in BAD:
+            return False
+        seen.add(k)
         for t in c.targets:
             if off(t[0]) is not None:
-                starts.add(t); work.append(t)
-        if c.flow in ('jump', 'end'):
+                todo.append(t)
+            elif c.flow != 'call':
+                return False
+        todo += [t for t in c.more if off(t[0]) is not None]
+        if c.flow not in ('jump', 'end'):
+            todo.append((c.next, c.mx_after))
+    return len(seen) >= 3 or k0 in ins
+
+
+def rom16(a):
+    lo, hi = rb(a), rb((a & 0xFF0000) | ((a + 1) & 0xFFFF))
+    return None if lo is None or hi is None else lo | hi << 8
+
+
+def table(a, bank, mx):
+    """a list of 16-bit code addresses at a; returns the entries that look like code"""
+    found = []
+    for i in range(256):
+        t = a + i * 2
+        v = rom16(t)
+        if v is None or v < 0x8000 or (t, 0) in ins or (t, 1) in ins or (t, 2) in ins or (t, 3) in ins:
             break
-        if c.flow in ('branch', 'call'):
-            starts.add((c.next, c.mx_after))
-        pc, mx = c.next, c.mx_after
+        k = (bank | v, mx)
+        if not plausible(k):
+            break
+        found.append(k)
+    return found
+
+
+def guesses():
+    new = []
+    by_addr = sorted(ins)
+    for (pc, mx), c in ((k, ins[k]) for k in by_addr):
+        bank = pc & 0xFF0000
+        w = rom16(bank | ((pc + 1) & 0xFFFF)) if c.n >= 3 else None
+        if c.op in (0x7C, 0xFC) and w is not None:              # JMP/JSR (table,X)
+            new += table(bank | w, bank, mx)
+        elif c.op in (0x6C, 0xDC):                              # table,X loaded just before
+            p = pc
+            for _ in range(10):
+                p = next((x for x in range(p - 1, p - 5, -1) if any((x, m) in ins and ins[(x, m)].next == p for m in range(4))), None)
+                if p is None:
+                    break
+                d = next((ins[(p, m)] for m in range(4) if (p, m) in ins), None)
+                if d.op in (0xB9, 0xBD):
+                    new += table(bank | rom16(bank | (p + 1 & 0xFFFF)), bank, mx)
+                    break
+        elif c.op == 0xF4 and w is not None and w >= 0x8000:    # PEA of a return address
+            new.append((bank | ((w + 1) & 0xFFFF), mx))
+        elif c.op == 0x28:                                      # PLP: try each mode that follows
+            new += [(c.next, m) for m in range(4)]
+    # a routine usually starts right after the end of the one before it
+    used = {(pc & 0xFF0000) | ((pc + i) & 0xFFFF) for (pc, mx), c in ins.items() for i in range(c.n)}
+    for (pc, mx), c in ((k, ins[k]) for k in by_addr):
+        if c.flow in ('jump', 'end') and not c.more and c.next not in used:
+            p = c.next
+            for _ in range(32):                                 # padding between routines
+                if rb(p) not in (0x00, 0xFF):
+                    break
+                p += 1
+            new += [(p, m) for m in dict.fromkeys((mx, 3, 0, 2, 1))]
+    return new
+
+
+walk()
+known = len(ins)
+for round_ in range(40):
+    tried = set()
+    n0 = len(ins)
+    for k in guesses():
+        if k in ins or k in tried or off(k[0]) is None:
+            continue
+        tried.add(k)
+        if plausible(k) and k not in ins:
+            if any((k[0], m) in ins for m in range(4)):         # that address already has a mode
+                continue
+            starts.add(k); entries.add(k); work.append(k)
+            walk()
+    if len(ins) == n0:
+        break
+print('followed %d instructions, guessed %d more in %d rounds' % (known, len(ins) - known, round_ + 1), file=sys.stderr)
 
 # An entry from a coverage log may only be the place an interrupt happened to
 # return to. When the instruction before it simply runs into it, it needs no
@@ -273,7 +381,8 @@ while work:
 falls_into = {(c.next, c.mx_after) for c in ins.values() if not c.flow}
 hard = set()
 for c in ins.values():
-    hard.update(t for t in c.targets)
+    hard.update(c.targets)
+    hard.update(c.more)
     if c.flow in ('branch', 'call'):
         hard.add((c.next, c.mx_after))
 starts = hard | {e for e in entries if e not in falls_into}

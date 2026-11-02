@@ -8,7 +8,8 @@
  * Keys: arrows, Z X C = A B C, A S D = X Y Z, Return = Start, Esc = quit. On a
  * SNES those are Z = B, X = A, A = Y, S = X, C = L, D = R, Tab = Select.
  * F1 = scanlines (faster), F2 = full screen at the display's own size,
- * F3 = set up a gamepad with InputSprocket, F8 = stats, F9 or F10 = options menu,
+ * F3 = set up a gamepad with InputSprocket, F5 = SNES recorder on or off,
+ * F8 = stats, F9 or F10 = options menu,
  * - and = = game speed, 0 = normal speed, or the bar: move the mouse to the
  * bottom of the picture and drag it.
  *
@@ -763,8 +764,8 @@ static int stats_on;
 static void settings_save(void) {
     FILE *f = fopen(SETTINGS, "w");
     if (!f) return;
-    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\nspeed %d\nstats %d\n", vdp_widescreen, enh_upscale, every_other,
-            enh_color, enh_shape, vdp_no_sprite_limit, speed_pct, stats_on);
+    fprintf(f, "wide %d\nupscale %d\nscanlines %d\ncolor %d\nshape %d\nlimit %d\nspeed %d\nstats %d\nrecord %d\n", vdp_widescreen, enh_upscale, every_other,
+            enh_color, enh_shape, vdp_no_sprite_limit, speed_pct, stats_on, snes_recording);
     fclose(f);
 }
 
@@ -1121,7 +1122,26 @@ static int game_load(const Game *g) {
         Game again = *g;
         snes_name(&again);
         snes_register_game = g->code == CODE_SMK ? recomp_register_smk : g->code == CODE_DKC ? recomp_register_dkc : NULL;
-        snes_force_interp = !snes_register_game;
+        snes_game_lib = NULL;
+        {   /* a library from the Genexia Recompiler beats code built into the app */
+            char name[16];
+            Str255 pname;
+            FSSpec spec;
+            ConnectionID conn;
+            Ptr entry = NULL;
+            Str255 err;
+            SymClass cls;
+            snprintf(name, sizeof name, "%08X.lib", (unsigned)snes_rom_crc());
+            pname[0] = (unsigned char)strlen(name);
+            memcpy(pname + 1, name, pname[0]);
+            if (FSMakeFSSpec(0, 0, pname, &spec) == noErr &&
+                GetDiskFragment(&spec, 0, 0, pname, kLoadNewCopy, &conn, &entry, err) == noErr &&
+                FindSymbol(conn, "\pgenexia_game", &entry, &cls) == noErr) {
+                snes_game_lib = (SnesGameEntry)entry;
+                snes_register_game = NULL;
+            }
+        }
+        snes_force_interp = !snes_register_game && !snes_game_lib;
         snes_game = 1;
         snd_rate = SNES_DSP_RATE;
         snd_gain = 2;
@@ -1363,6 +1383,7 @@ int main(void) {
     vdp_no_sprite_limit = settings_get("limit", 1);
     set_speed(settings_get("speed", 100));
     stats_on = settings_get("stats", 1);
+    snes_recording = settings_get("record", 1);
 
     depth_lower();
     const Game *game = game_select();
@@ -1443,6 +1464,7 @@ int main(void) {
             if (dragged && !bar_drag) settings_save();
         }
         if (press(0x64)) { stats_on = !stats_on; settings_save(); }
+        if (snes_game && press(0x60)) { snes_recording = !snes_recording; snes_record_flush(); settings_save(); }
         if (press(0x65) | press(0x6D)) {
             menu_run();
             deadline = timebase();
@@ -1506,6 +1528,7 @@ int main(void) {
                     const u32 sum = nat / 100 + emu / 100 + 1;
                     const int comp = (int)(nat / 100 * 100 / sum);
                     snprintf(stats[0], sizeof stats[0], "FPS %d  GAME %d  SPEED %d%%", (int)(shown * 60 / ticks), (int)(ran * 60 / ticks), speed_pct);
+                    if (snes_game && snes_recording) { char *e = stats[0] + strlen(stats[0]); snprintf(e, stats[0] + sizeof stats[0] - e, "  REC %u", (unsigned)snes_recorded); }
                     snprintf(stats[1], sizeof stats[1], "%s COMPILED %d%% EMULATED %d%%", snes_game ? "65816" : "68000", comp, 100 - comp);
                     if (snes_game) snprintf(stats[2], sizeof stats[2], "CPU %d PPU %d APU %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)(t_ym / p), (int)(t_vid / p));
                     else snprintf(stats[2], sizeof stats[2], "CPU %d VDP %d SND %d DRAW %d", (int)(t_68k / p), (int)(t_vdp / p), (int)((t_ym + t_z80) / p), (int)(t_vid / p));

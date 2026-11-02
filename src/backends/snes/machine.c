@@ -428,12 +428,26 @@ static void line_irq_setup(int line) {
  * code in RAM, addresses the recompiler never saw) runs on the interpreter. */
 #include <stdio.h>
 #include <stdlib.h>
+static char rom_title[24];
 typedef void (*w65fn)(void);
 static w65fn *block_bank[256];
 int snes_force_interp;
 void (*snes_register_game)(void);
-static FILE *miss_log;
+SnesGameEntry snes_game_lib;
+/* The recorder: addresses that fell to the interpreter, kept in memory and added
+ * to a file every few seconds. The file stays closed in between, so File Sharing
+ * can fetch it during play. */
+static char miss_path[512], miss_buf[0x4000];
+static int miss_len;
 static u8 *miss_seen;
+int snes_recording = 1;
+u32 snes_recorded;
+void snes_record_flush(void) {
+    if (!miss_len) return;
+    FILE *f = fopen(miss_path, "a");
+    if (f) { fwrite(miss_buf, 1, (size_t)miss_len, f); fclose(f); }
+    miss_len = 0;
+}
 u64 snes_blocks_run, snes_interp_run;
 u32 snes_native_cycles, snes_interp_cycles;
 
@@ -488,11 +502,13 @@ static inline void cpu_slice(void) {
             next_pc = 0xFFFFFFFF;
             return;
         }
-        if (miss_log && pc != next_pc && ((w65.pc >= 0x8000 && w65.pb < 0x7E) || w65.pb >= 0x80 || (w65.pb >= 0x40 && w65.pb < 0x7E))) {
+        if (miss_seen && snes_recording && pc != next_pc && ((w65.pc >= 0x8000 && w65.pb < 0x7E) || w65.pb >= 0x80 || (w65.pb >= 0x40 && w65.pb < 0x7E))) {
             u32 k = pc << 2 | (u32)mx;
             if (!(miss_seen[k >> 3] & (1 << (k & 7)))) {
                 miss_seen[k >> 3] |= (u8)(1 << (k & 7));
-                fprintf(miss_log, "%06X %d\n", pc, mx); fflush(miss_log);
+                miss_len += snprintf(miss_buf + miss_len, 16, "%06X %d\n", pc, mx);
+                snes_recorded++;
+                if (miss_len > (int)sizeof miss_buf - 16) snes_record_flush();
             }
         }
         u32 before = pc;
@@ -543,6 +559,7 @@ void snes_run_frame(void) {
         apu_catch_up(snes_master);
     }
     (void)update_hdma_nothing;
+    { static int fr; if (++fr >= 300) { fr = 0; snes_record_flush(); } }
     /* only the distance between two counts matters, so start each frame near 0 */
     snes_master -= base;
     snes_apu_rebase(base);
@@ -565,8 +582,17 @@ int snes_detect(void) {
     return score_header(0x7FC0) >= 16 || score_header(0xFFC0) >= 16;
 }
 
+u32 snes_rom_crc(void) {
+    u32 c = 0xFFFFFFFF;
+    for (u32 i = 0; i < rom_size; i++) {
+        c ^= rom[i];
+        for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320 & -(c & 1));
+    }
+    return ~c;
+}
+
 const char *snes_load(void) {
-    static char title[24];
+    char *title = rom_title;
     if (rom_size % 1024 == 512) {                  /* copier header */
         rom_size -= 512;
         memmove(rom, rom + 512, rom_size);
@@ -587,9 +613,21 @@ void snes_reset(void) {
     static int registered;
     if (!registered) {
         registered = 1;
-        if (snes_register_game) snes_register_game();
+        if (snes_game_lib) {
+            static const SnesEnv env = { &w65, &snes_master, &snes_slice_end, &snes_rom_speed, snes_rmap, snes_wmap, snes_tmap, &snes_mdr,
+                                         w65_bus_read, w65_bus_write, w65_bus_idle, w65_exec, snes_recomp_add };
+            snes_game_lib(&env);
+        } else if (snes_register_game) snes_register_game();
+#ifdef GENEXIA_OS9
+        /* the iMac records every play: "<title>.miss" beside the application */
+        char name[32];
+        snprintf(name, sizeof name, "%.26s.miss", rom_title);
+        for (char *c = name; *c; c++) if (*c == ':') *c = '_';
+        const char *p = name;
+#else
         const char *p = getenv("SF2_MISSLOG");
-        if (p) { miss_log = fopen(p, "a"); miss_seen = calloc(1 << 23, 1); }
+#endif
+        if (p) { snprintf(miss_path, sizeof miss_path, "%s", p); miss_seen = calloc(1 << 23, 1); atexit(snes_record_flush); }
     }
     memset(wram, 0x55, sizeof wram);
     memset(ch, 0xFF, sizeof ch);

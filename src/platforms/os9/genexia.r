@@ -6,5 +6,5 @@ resource 'SIZE' (-1) {
     ignoreChildDiedEvents, is32BitCompatible, isHighLevelEventAware,
     onlyLocalHLEvents, notStationeryAware, dontUseTextEditServices,
     reserved, reserved, reserved,
-    112 * 1024 * 1024, 96 * 1024 * 1024
+    128 * 1024 * 1024, 112 * 1024 * 1024
 };

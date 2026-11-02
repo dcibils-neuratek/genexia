@@ -18,6 +18,7 @@
 #include <time.h>
 #include <SDL.h>
 #include "m68k.h"
+#include <dlfcn.h>
 #include "bus.h"
 #include "state.h"
 #include "combo.h"
@@ -181,6 +182,13 @@ static void monkey_input(unsigned *rng, int f) {
         mk.hold = 2 + (int)((*rng >> 24) & 15);
     }
     int ph = f % 9000;
+    if (getenv("SF2_MONKEY_RUN")) {     /* platformers: run right and jump, with a Start now and then */
+        u16 b = PAD_RIGHT | (mk.held[0] & (PAD_A | PAD_B | PAD_X | PAD_UP | PAD_DOWN));
+        if (!(mk.held[1] & 0x30)) b = mk.held[0];
+        if (f % 600 < 4) b = PAD_START;
+        pad_state[0] = b; pad_state[1] = 0;
+        return;
+    }
     if (ph < 1500) {
         /* menu phase: alternate Start / punch pulses to get into a fight */
         u16 pulse = ((f / 40) & 1) ? PAD_START : PAD_X;
@@ -516,7 +524,15 @@ static void configure_game(int region_set) {
                              ? recomp_register_smk
                              : !strcmp(game_title, "DONKEY KONG COUNTRY") && rom[0xFFDE] == 0xCC && rom[0xFFDF] == 0x2B
                              ? recomp_register_dkc : NULL;
-        snes_force_interp = m68k_force_interp || !snes_register_game;
+        /* a library from the Genexia Recompiler beats code built into the app */
+        char lib_path[512] = "";
+        if (getenv("SF2_GAMELIB")) snprintf(lib_path, sizeof lib_path, "%s", getenv("SF2_GAMELIB"));
+        else if (getenv("HOME") && !getenv("SF2_NOGAMELIB"))
+            snprintf(lib_path, sizeof lib_path, "%s/Library/Application Support/Genexia/games/%08X/game.dylib", getenv("HOME"), snes_rom_crc());
+        snes_game_lib = NULL;
+        void *lib = lib_path[0] ? dlopen(lib_path, RTLD_NOW) : NULL;
+        if (lib && (snes_game_lib = (SnesGameEntry)dlsym(lib, "genexia_game"))) snes_register_game = NULL;
+        snes_force_interp = m68k_force_interp || !(snes_register_game || snes_game_lib);
         if (!probing) fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
         return;
     }
@@ -1191,7 +1207,7 @@ int main(int argc, char **argv) {
     configure_game(region_set);
     snprintf(key_wide, sizeof key_wide, "wide_%02X%02X", rom[0x18E], rom[0x18F]);
     snprintf(key_limit, sizeof key_limit, "limit_%02X%02X", rom[0x18E], rom[0x18F]);
-    int enhanced = vdp_hud_rules != 0 || (be == &backend_snes && snes_register_game);
+    int enhanced = vdp_hud_rules != 0 || (be == &backend_snes && (snes_register_game || snes_game_lib));
     if (be == &backend_n64 && !runahead_cli) runahead = 0;   /* 8 MB per snapshot: opt-in */
     vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
     vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);

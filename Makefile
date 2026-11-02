@@ -39,7 +39,7 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: FORCE os9 os9-n64bench os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-dkc recompile-sm64 coverage app tests clean
+.PHONY: FORCE os9 os9-n64bench os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-dkc harvest-dkc recompile-sm64 coverage app tests clean
 
 all: genexia
 
@@ -98,8 +98,16 @@ DKC_ROM ?= roms/snes/Donkey Kong Country (U) (V1.2) [!].smc
 recompile-dkc:
 	python3 tools/recompile_65816.py "$(DKC_ROM)" recomps/snes/dkc --entries recomps/snes/dkc/coverage.txt --listing docs/dkc.lst --prefix D_ --register recomp_register_dkc
 
+# What the iMac recorded while DKC was played (F5 turns the recorder on and off):
+# fetch it, compile it in, then make os9-push. The file is left for the next round.
+DKC_MISS ?= DONKEY KONG COUNTRY.miss
+harvest-dkc:
+	python3 tools/os9_share.py $(IMAC) get "$(DKC_MISS)" > $(BUILD)/dkc.miss
+	sort -u -o recomps/snes/dkc/coverage.txt recomps/snes/dkc/coverage.txt $(BUILD)/dkc.miss
+	$(MAKE) recompile-dkc
+
 # dev: each recompiled block checked against the interpreter, see machine.c
-LS_SRC := src/backends/snes/machine.c $(wildcard recomps/snes/smk/recomp_*.c)
+LS_SRC := src/backends/snes/machine.c $(wildcard recomps/snes/*/recomp_*.c)
 LS_OBJ := $(patsubst %.c,$(BUILD)/ls/%.o,$(LS_SRC))
 LS_REST := $(filter-out $(BUILD)/backends/snes/machine.o $(BUILD)/gen/snes/%,$(OBJS))
 $(BUILD)/ls/%.o: %.c $(HDRS)
@@ -156,7 +164,7 @@ os9: $(BUILD)/version.h
 	  -DCMAKE_TOOLCHAIN_FILE=$(RETRO68)/toolchain/powerpc-apple-macos/cmake/retroppc.toolchain.cmake
 	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake --build $(BUILD)/os9/cmake -- -j8
 	cp $(BUILD)/os9/cmake/Genexia.bin $(BUILD)/os9/Genexia.bin
-	dd if=/dev/zero of=$(BUILD)/os9/Genexia.dsk bs=1m count=32 2>/dev/null
+	dd if=/dev/zero of=$(BUILD)/os9/Genexia.dsk bs=1m count=64 2>/dev/null
 	PATH="$(RETRO68)/toolchain/bin:$$PATH"; hformat -l Genexia $(BUILD)/os9/Genexia.dsk >/dev/null && \
 	  hcopy -m $(BUILD)/os9/Genexia.bin :Genexia && \
 	  { [ ! -f "$(ROM)" ] || hcopy -r "$(ROM)" :sf2.bin; } && humount
