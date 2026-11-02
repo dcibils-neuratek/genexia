@@ -447,6 +447,12 @@ static void hle(int i) {
     else if (IS("sceAudioChRelease")) { if (A0 < AUDIO_CHANNELS) chans[A0].reserved = 0; }
     else if (IS("sceAudioSetChannelDataLen")) { if (A0 < AUDIO_CHANNELS) chans[A0].samples = (int)A1; }
     else if (IS("sceKernelGetSystemTime")) { WR32(A0, (u32)now_us); WR32(A0 + 4, (u32)(now_us >> 32)); }
+    else if (IS("sceAtracGetMaxSample")) { if (A1) WR32(A1, 2048); }
+    else if (IS("sceAtracGetNextSample")) { struct Atrac *a = atrac_of(A0); if (A1) WR32(A1, a && a->at + a->block <= a->end ? 2048 : 0); }
+    else if (IS("sceUtilityOskInitStart")) osk_start(A0);
+    else if (IS("sceUtilityOskGetStatus")) RET(dialog_status(&osk_status));
+    else if (IS("sceUtilityOskUpdate")) { if (osk_status == 2) osk_status = 3; }
+    else if (IS("sceUtilityOskShutdownStart")) osk_status = 4;
     else if (IS("sceUtilitySavedataInitStart")) save_start(A0);
     else if (IS("sceUtilitySavedataGetStatus")) RET(dialog_status(&save_status));
     else if (IS("sceUtilitySavedataUpdate")) { if (save_status == 2) save_status = 3; }

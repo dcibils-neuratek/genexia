@@ -145,3 +145,17 @@ static u32 save_dir_close(u32 fd) {
     listings[i] = NULL; listing_paths[i][0] = 0;
     return 0;
 }
+
+/* the on-screen keyboard: nothing to type on yet, so it accepts the text it was given */
+static int osk_status = -1;
+
+static void osk_start(u32 params) {
+    const u32 data = RD32(params + 52);
+    const u32 in = RD32(data + 32), out = RD32(data + 40), limit = RD32(data + 48);
+    u32 n = 0;
+    if (in && out) for (; n + 1 < limit && RD16(in + n * 2); n++) WR16(out + n * 2, RD16(in + n * 2));
+    if (out && limit) WR16(out + n * 2, 0);
+    WR32(data + 36, n); WR32(data + 44, 2);
+    WR32(params + 28, 0);
+    osk_status = 1;
+}
