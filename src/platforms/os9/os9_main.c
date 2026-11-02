@@ -1168,15 +1168,11 @@ extern long long r4300_native_cycles, r4300_interp_cycles;
 
 #define SND_TARGET 4000.0            /* stereo frames queued, about 1/8 second */
 typedef void *AGLPixelFormat, *AGLContext;
-enum { AGL_NONE = 0, AGL_RGBA = 4, AGL_DOUBLEBUFFER = 5, AGL_DEPTH_SIZE = 12, AGL_FULLSCREEN = 54, AGL_ACCELERATED = 73 };
+enum { AGL_NONE = 0, AGL_RGBA = 4, AGL_DOUBLEBUFFER = 5, AGL_DEPTH_SIZE = 12, AGL_ACCELERATED = 73 };
 static CFragConnection *gl_lib;
-static AGLContext gl_ctx, gl_win_ctx, gl_fs_ctx;
-static AGLPixelFormat (*agl_choose)(const void *, long, const long *);
-static AGLContext (*agl_create)(AGLPixelFormat, AGLContext);
-static unsigned char (*agl_current)(AGLContext);
+static AGLContext gl_ctx;
 static void (*agl_swap)(AGLContext);
 static unsigned char (*agl_drawable)(AGLContext, CGrafPtr);
-static unsigned char (*agl_full)(AGLContext, long, long, long, long);
 static u32 t_gl;
 static int gl_shown, gl_skipped, stats_fresh;
 
@@ -1210,34 +1206,12 @@ static void n64_view(void) {
     f3d_view((area_w - w) / 2, (area_h - h) / 2, w, h);
 }
 
-/* Flipping the card's own buffers beats copying a screenful out of a window,
- * which took half of each frame. That needs a second context, sharing the first
- * one's textures; a big window if the card won't do it. */
+/* A whole screen copied out of the window takes half of each frame, so full
+ * screen uses thousands of colours: half the data. aglSetFullScreen would flip
+ * instead, but asking for its pixel format crashes here. */
 static void n64_full(int full) {
-    const Rect sb = qd.screenBits.bounds;
-    const int sw = sb.right - sb.left, sh = sb.bottom - sb.top;
-    if (full && !gl_fs_ctx && agl_full) {
-        static const long attr[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_ACCELERATED, AGL_FULLSCREEN, AGL_NONE };
-        GDHandle gd = GetMainDevice();
-        AGLPixelFormat pf = agl_choose(&gd, 1, attr);
-        if (pf) gl_fs_ctx = agl_create(pf, gl_win_ctx);
-        log_line(gl_fs_ctx ? "full screen: context made" : "full screen: no context");
-    }
-    if (full && gl_fs_ctx && agl_current(gl_fs_ctx) && agl_full(gl_fs_ctx, sw, sh, 0, 0)) {
-        gl_ctx = gl_fs_ctx;
-        full_screen = 1;
-        area_w = sw; area_h = sh;
-        menu_bar_show(0);
-        f3d_init();
-        const int w = sh * 4 / 3 > sw ? sw : sh * 4 / 3, h = w * 3 / 4;
-        f3d_view((sw - w) / 2, (sh - h) / 2, w, h);
-        log_line("full screen: flipping");
-        return;
-    }
-    if (gl_ctx != gl_win_ctx) { agl_drawable(gl_ctx, NULL); gl_ctx = gl_win_ctx; }
-    agl_current(gl_ctx);
+    if (full) depth_lower(); else depth_restore();
     open_window(full);
-    f3d_init();
     n64_view();
 }
 
@@ -1248,17 +1222,16 @@ static const char *n64_gl_open(void) {
 #define X(r, n, a) if (!(n = (r (*) a)gl_sym(#n))) { snprintf(why, sizeof why, "no %s", #n); return why; }
     GL_FUNCTIONS
 #undef X
-    agl_choose = gl_sym("aglChoosePixelFormat");
-    agl_create = gl_sym("aglCreateContext");
-    agl_current = gl_sym("aglSetCurrentContext");
+    AGLPixelFormat (*choose)(const void *, long, const long *) = gl_sym("aglChoosePixelFormat");
+    AGLContext (*create)(AGLPixelFormat, AGLContext) = gl_sym("aglCreateContext");
+    unsigned char (*current)(AGLContext) = gl_sym("aglSetCurrentContext");
     agl_swap = gl_sym("aglSwapBuffers");
     agl_drawable = gl_sym("aglSetDrawable");
-    agl_full = gl_sym("aglSetFullScreen");
     static const long attr[] = { AGL_RGBA, AGL_DOUBLEBUFFER, AGL_DEPTH_SIZE, 16, AGL_ACCELERATED, AGL_NONE };
-    AGLPixelFormat pf = agl_choose ? agl_choose(NULL, 0, attr) : NULL;
+    AGLPixelFormat pf = choose ? choose(NULL, 0, attr) : NULL;
     if (!pf) return "no accelerated OpenGL";
-    gl_ctx = gl_win_ctx = agl_create(pf, NULL);
-    if (!gl_ctx || !agl_drawable(gl_ctx, (CGrafPtr)win) || !agl_current(gl_ctx)) return "no OpenGL context";
+    gl_ctx = create(pf, NULL);
+    if (!gl_ctx || !agl_drawable(gl_ctx, (CGrafPtr)win) || !current(gl_ctx)) return "no OpenGL context";
     f3d_init();
     n64_view();
     return NULL;
