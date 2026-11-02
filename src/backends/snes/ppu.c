@@ -57,9 +57,11 @@ static u32 above[512], below[512];     /* main and sub screen */
 static u8  win_mask[6][512];
 /* Widescreen: frames with Mode 7 render XO extra pixels on each side (game x
  * -XO..255+XO, buffer index x+XO, LW pixels). Other frames stay 256 wide,
- * centred with black bars (PAD). XO is 0 whenever widescreen is off. */
-#define WIDE_MARGIN 43
+ * centred with black bars (PAD). XO is 0 whenever widescreen is off.
+ * vdp_widescreen 2 is ultrawide, 21:9. */
+#define WIDE_MARGIN (vdp_widescreen == 2 ? 96 : 43)
 static int XO, LW = 256, PAD;
+u32 snes_frames_total, snes_frames_mode7;
 EMU_STATE static u8 saw_mode7, saw_mode7_prev, wide_frame;
 static u8  win_active[6];
 static u64 expand_l[256], expand_r[256]; /* bit -> byte; _l: bit 7 is pixel 0 */
@@ -164,6 +166,7 @@ void snes_ppu_vblank(void)
 void snes_ppu_frame_start(void)
 {
     saw_mode7_prev = saw_mode7; saw_mode7 = 0;
+    snes_frames_total++; snes_frames_mode7 += saw_mode7_prev;
     wide_frame = vdp_widescreen && saw_mode7_prev;
     P.in_vblank = 0;
     P.field ^= 1;

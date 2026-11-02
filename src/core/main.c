@@ -182,6 +182,12 @@ static void monkey_input(unsigned *rng, int f) {
         mk.hold = 2 + (int)((*rng >> 24) & 15);
     }
     int ph = f % 9000;
+    if (getenv("SF2_MONKEY_MENU")) {    /* menus: Start and A in turn, wandering between them */
+        u16 b = (f % 90) < 4 ? PAD_START : (f % 90) >= 45 && (f % 90) < 49 ? PAD_A : (f % 90) >= 20 && (f % 90) < 24 ? (u16)(1u << ((mk.held[0] >> 4) & 3)) : 0;
+        if (f % 2400 > 1200) b = mk.held[0];
+        pad_state[0] = b; pad_state[1] = 0;
+        return;
+    }
     if (getenv("SF2_MONKEY_RUN")) {     /* platformers: run right and jump, with a Start now and then */
         u16 b = PAD_RIGHT | (mk.held[0] & (PAD_A | PAD_B | PAD_X | PAD_UP | PAD_DOWN));
         if (!(mk.held[1] & 0x30)) b = mk.held[0];
@@ -615,7 +621,9 @@ static const char *glyph(char c) {
     case '8': return "111101111101111"; case '9': return "111101111001111";
     case '%': return "101001010100101"; case 'S': return "111100111001111";
     case 'P': return "111101111100100"; case 'E': return "111100111100111";
-    case 'D': return "110101101101110"; default:  return "000000000000000";
+    case 'D': return "110101101101110"; case 'R': return "110101110101101";
+    case 'C': return "111100100100111"; case 'O': return "111101101101111";
+    case 'F': return "111100110100100"; default:  return "000000000000000";
     }
 }
 static void draw_text(SDL_Renderer *ren, const char *t, int x, int y, int px) {
@@ -1145,6 +1153,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--interp")) m68k_force_interp = 1;
         else if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom_path = argv[++i];
         else if (!strcmp(argv[i], "--wide")) wide_opt = 1;
+        else if (!strcmp(argv[i], "--ultrawide")) wide_opt = 2;
         else if (!strcmp(argv[i], "--no-wide")) wide_opt = 0;
         else if (!strcmp(argv[i], "--res") && i + 1 < argc) enh_res = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) enh_aspect = atoi(argv[++i]);
@@ -1211,6 +1220,30 @@ int main(int argc, char **argv) {
     if (be == &backend_n64 && !runahead_cli) runahead = 0;   /* 8 MB per snapshot: opt-in */
     vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
     vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);
+    if (!headless && be == &backend_snes && getenv("HOME")) {    /* set per game in the Genexia Recompiler */
+        char p[512], k[32];
+        int v;
+        snprintf(p, sizeof p, "%s/Library/Application Support/Genexia/games/%08X/options.txt", getenv("HOME"), snes_rom_crc());
+        FILE *o = fopen(p, "r");
+        if (o) {
+            settings_path[0] = 0;              /* this run's choices aren't the player's defaults */
+            while (fscanf(o, "%31s %d", k, &v) == 2) {
+                if (!strcmp(k, "picture")) { vdp_widescreen = v >= 2 ? v - 1 : 0; pic_shape = v == 1; }
+                else if (!strcmp(k, "filter")) video_filter = v % FILTER_COUNT;
+                else if (!strcmp(k, "sprites")) vdp_no_sprite_limit = v;
+                else if (!strcmp(k, "runahead")) runahead = v % 3;
+                else if (!strcmp(k, "speed")) set_speed(v);
+                else if (!strcmp(k, "record")) snes_recording = v;
+            }
+            fclose(o);
+        }
+    }
+    if (be == &backend_snes && (!headless || getenv("SF2_RECORD_TEST")) && getenv("HOME") && !getenv("SF2_MISSLOG")) {
+        char dir[440];                         /* a built game grows from being played */
+        snprintf(dir, sizeof dir, "%s/Library/Application Support/Genexia/games/%08X", getenv("HOME"), snes_rom_crc());
+        struct stat st;
+        if (!stat(dir, &st)) snprintf(snes_record_path, sizeof snes_record_path, "%s/recorded.txt", dir);
+    }
     power_on();
     if (wav) wav_open(wav);
     /* save-state slot: next to the ROM file, or in Application Support when built in */
@@ -1346,6 +1379,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "frames %d  blocks %llu  interp-steps %llu  pc %06X\n", frames,
                 (unsigned long long)(m68k_blocks_run + snes_blocks_run),
                 (unsigned long long)(m68k_interp_run + snes_interp_run), cpu.pc);
+        if (be == &backend_snes) {
+            extern u32 snes_frames_total, snes_frames_mode7;
+            fprintf(stderr, "cycles native %llu emulated %llu mode7 %u of %u\n", (unsigned long long)snes_native_total, (unsigned long long)snes_interp_total, snes_frames_mode7, snes_frames_total);
+        }
         return 0;
     }
 
@@ -1353,9 +1390,9 @@ int main(int argc, char **argv) {
     signal(SIGALRM, on_signal);
     SDL_Window *win = sel_win ? sel_win : SDL_CreateWindow("Genexia",
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       (vdp_widescreen ? 398 : 320) * scale, 224 * scale,
+                                       (vdp_widescreen == 2 ? 522 : vdp_widescreen ? 398 : 320) * scale, 224 * scale,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (sel_win) SDL_SetWindowSize(win, (vdp_widescreen ? 398 : 320) * scale, 224 * scale);
+    if (sel_win) SDL_SetWindowSize(win, (vdp_widescreen == 2 ? 522 : vdp_widescreen ? 398 : 320) * scale, 224 * scale);
     SDL_Renderer *ren = sel_ren ? sel_ren : SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, VDP_FB_STRIDE, 240);
@@ -1382,6 +1419,7 @@ int main(int argc, char **argv) {
     u64 freq = SDL_GetPerformanceFrequency();
     double next = (double)SDL_GetPerformanceCounter() / freq;
     int running = 1, paused = 0, fast = 0;
+    u32 rec_shown = 0;                     /* "REC OFF" stays up this long after F8 */
     u32 osd_until = getenv("SF2_WINSHOT_OSD") ? 0xFFFFFFFFu : 0;          /* speed slider visible until this tick */
     int dragging = 0, last_speed = -1;
     u64 t_start = SDL_GetPerformanceCounter(), nframes = 0;
@@ -1436,6 +1474,9 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_O: combo_pad_hint[1] = 0; combo_start(1, 1); break;
                 case SDL_SCANCODE_F6: runahead = (runahead + 1) % 3; last_speed = -1; break;
                 case SDL_SCANCODE_F5: state_write_file(state_path); break;
+                case SDL_SCANCODE_F8:
+                    if (snes_record_path[0]) { snes_recording = !snes_recording; snes_record_flush(); rec_shown = SDL_GetTicks() + 2500; }
+                    break;
                 case SDL_SCANCODE_F7: state_read_file(state_path); break;
                 case SDL_SCANCODE_MINUS: case SDL_SCANCODE_KP_MINUS:
                     set_speed(speed_pct - 10); osd_until = SDL_GetTicks() + 2500; break;
@@ -1596,7 +1637,7 @@ int main(int argc, char **argv) {
             SDL_RenderSetViewport(ren, NULL);
             /* widescreen: TV-correct 16:9 (game width * 4/3 always fills it);
              * otherwise the original square-pixel picture */
-            double aspect = be == &backend_n64 ? n64_aspects[enh_aspect] : vdp_widescreen ? 16.0 / 9.0 : pic_shape ? 4.0 / 3.0 : (double)vdp_screen_w / vdp_screen_h;
+            double aspect = be == &backend_n64 ? n64_aspects[enh_aspect] : vdp_widescreen == 2 ? 21.0 / 9.0 : vdp_widescreen ? 16.0 / 9.0 : pic_shape ? 4.0 / 3.0 : (double)vdp_screen_w / vdp_screen_h;
             SDL_Rect dst;
             if ((double)ow / oh > aspect) { dst.h = oh; dst.w = (int)(oh * aspect + 0.5); }
             else { dst.w = ow; dst.h = (int)(ow / aspect + 0.5); }
@@ -1611,6 +1652,27 @@ int main(int argc, char **argv) {
                 crt_draw(ren, show, &src, &dst, src.w * vdp_screen_h / src.h, vdp_screen_h);
         }
         if (SDL_GetTicks() < osd_until || dragging) draw_osd(ren, win);
+        if (snes_record_path[0] && be == &backend_snes && (snes_recording || SDL_GetTicks() < rec_shown)) {
+            static u32 seen, fresh_until;      /* a badge in the corner, bright while new code turns up */
+            if (snes_recorded != seen) { seen = snes_recorded; fresh_until = SDL_GetTicks() + 1500; }
+            int bw, bh, px;
+            SDL_GetRendererOutputSize(ren, &bw, &bh);
+            px = bh / 300 > 2 ? bh / 300 : 2;
+            char t[32];
+            if (snes_recording) snprintf(t, sizeof t, "REC %u", (unsigned)snes_recorded);
+            else snprintf(t, sizeof t, "REC OFF");
+            int w = (int)strlen(t) * 4 * px, x = bw - w - 8 * px;
+            int lit = snes_recording && (SDL_GetTicks() < fresh_until || (SDL_GetTicks() / 600) % 2);
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
+            SDL_Rect back = { x - 10 * px, 4 * px, w + 14 * px, 9 * px };
+            SDL_RenderFillRect(ren, &back);
+            SDL_SetRenderDrawColor(ren, 255, 40, 40, lit ? 255 : 90);
+            SDL_Rect dot = { x - 8 * px, 6 * px, 5 * px, 5 * px };
+            SDL_RenderFillRect(ren, &dot);
+            SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+            draw_text(ren, t, x, 6 * px, px);
+        }
         if (speed_pct != last_speed) {
             char title[128];
             snprintf(title, sizeof title, "Genexia build %s  -  %s  -  F10 options%s", GENEXIA_BUILD, game_title, speed_pct == 100 ? "" : "  -  speed");

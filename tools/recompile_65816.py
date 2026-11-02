@@ -3,7 +3,7 @@
 recompile_65816.py - static recompiler: 65C816 ROM -> C source.
 
   recompile_65816.py ROM OUTDIR --prefix S_ --register recomp_register_smk \
-      [--entries FILE] [--listing FILE]
+      [--entries FILE] [--listing FILE] [--map FILE]
 
 Same pipeline as the 68000 recompiler: entry points come from coverage logs,
 code is found by following static control flow, and each basic block becomes a
@@ -16,12 +16,13 @@ sitting after the end of a known one. A wrong guess costs only code size. A bloc
 runs only when the CPU is at exactly that (pc, mx), and ROM can't change, so what
 it does is right whether or not the guess was.
 """
+import json
 import os
 import sys
 
 a = sys.argv[1:]
 rom_path, outdir = a[0], a[1]
-prefix, register_fn, entry_files, listing = 'S_', 'recomp_register', [], None
+prefix, register_fn, entry_files, listing, map_file = 'S_', 'recomp_register', [], None, None
 i = 2
 while i < len(a):
     k, v = a[i], a[i + 1]; i += 2
@@ -29,6 +30,7 @@ while i < len(a):
     elif k == '--register': register_fn = v
     elif k == '--entries': entry_files.append(v)
     elif k == '--listing': listing = v
+    elif k == '--map': map_file = v
     else: sys.exit('bad arg ' + k)
 
 rom = open(rom_path, 'rb').read()
@@ -460,6 +462,22 @@ with open(os.path.join(outdir, 'recomp_register.c'), 'w') as f:
     for n in range(nfiles):
         f.write('    %s_%d();\n' % (register_fn, n))
     f.write('}\n')
+if map_file:
+    # what was found, in the order it was found, for the Recompiler's ROM map
+    order = [c for c in ins.values() if off(c.pc) is not None]
+    edges, ticker, step_t = [], [], max(1, len(order) // 600)
+    for i, c in enumerate(order):
+        for t, _ in c.targets:
+            o = off(t)
+            if o is not None:
+                edges.append([i, off(c.pc), o])
+        if i % step_t == 0:
+            hexes = ' '.join('%02X' % rb((c.pc & 0xFF0000) | ((c.pc + j) & 0xFFFF)) for j in range(c.n))
+            ticker.append([i, '$%02X:%04X' % (c.pc >> 16, c.pc & 0xFFFF), hexes, c.c[:44]])
+    edges = edges[::max(1, len(edges) // 2500)]
+    with open(map_file, 'w') as f:
+        json.dump({'size': SZ, 'followed': known, 'offsets': [off(c.pc) for c in order], 'lengths': [c.n for c in order],
+                   'edges': edges, 'ticker': ticker}, f, separators=(',', ':'))
 if listing:
     with open(listing, 'w') as f:
         for k in sorted(ins):

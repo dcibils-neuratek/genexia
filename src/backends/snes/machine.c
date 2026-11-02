@@ -293,7 +293,11 @@ static u8 tr_read(u32 a) {
     return 0;
 }
 static void tr_write(u32 a, u8 v) {
-    if (tr_i < tr_n && trace[tr_i].wr && trace[tr_i].a == a && trace[tr_i].v == v) { snes_master += access_time(a) + trace[tr_i].extra; tr_i++; return; }
+    if (tr_i < tr_n && trace[tr_i].wr && trace[tr_i].a == a && trace[tr_i].v == v) {
+        snes_master += access_time(a) + trace[tr_i].extra; tr_i++;
+        if (!(a & 0x400000) && (a & 0xFFFF) == 0x420D) memsel = v;   /* later fetches run at the new speed */
+        return;
+    }
     tr_bad = 1;
     snes_master += access_time(a);
 }
@@ -441,6 +445,7 @@ static char miss_path[512], miss_buf[0x4000];
 static int miss_len;
 static u8 *miss_seen;
 int snes_recording = 1;
+char snes_record_path[512];
 u32 snes_recorded;
 void snes_record_flush(void) {
     if (!miss_len) return;
@@ -450,6 +455,7 @@ void snes_record_flush(void) {
 }
 u64 snes_blocks_run, snes_interp_run;
 u32 snes_native_cycles, snes_interp_cycles;
+u64 snes_native_total, snes_interp_total;   /* the whole run, waiting left out */
 
 void snes_recomp_add(const SnesBlock *t, unsigned n) {
     for (unsigned i = 0; i < n; i++) {
@@ -463,11 +469,12 @@ void snes_recomp_add(const SnesBlock *t, unsigned n) {
 static void run_block(w65fn f, u32 pc, int mx) {
     W65816 before = w65;
     s32 m0 = snes_master;
+    u8 speed0 = memsel;
     tr_n = tr_i = 0; tr_mode = 1; tr_bad = 0;
     f();
     W65816 after = w65;
     s32 m1 = snes_master;
-    w65 = before; snes_master = m0; tr_mode = 2;
+    w65 = before; snes_master = m0; memsel = speed0; tr_mode = 2;
     int guard = 0;
     do w65_exec();
     while (!(w65.pc == after.pc && w65.pb == after.pb && snes_master >= m1) && ++guard < 300);
@@ -499,6 +506,7 @@ static inline void cpu_slice(void) {
             CALL_BLOCK(f, pc, mx);
             snes_blocks_run++;
             snes_native_cycles += (u32)(snes_master - m);
+            snes_native_total += (u32)(snes_master - m);
             next_pc = 0xFFFFFFFF;
             return;
         }
@@ -515,14 +523,17 @@ static inline void cpu_slice(void) {
         const s32 m = snes_master;
         w65_step();
         snes_interp_cycles += (u32)(snes_master - m);
+        snes_interp_total += (u32)(snes_master - m);
         snes_interp_run++;
         u32 after = (u32)w65.pb << 16 | w65.pc;
         next_pc = (after > before && after - before <= 4) ? after : 0xFFFFFFFF;
         return;
     }
     const s32 m = snes_master;
+    const int idle = w65.waiting || w65.stopped;
     w65_step();
     snes_interp_cycles += (u32)(snes_master - m);
+    if (!idle) snes_interp_total += (u32)(snes_master - m);
     next_pc = 0xFFFFFFFF;
 }
 
@@ -625,7 +636,7 @@ void snes_reset(void) {
         for (char *c = name; *c; c++) if (*c == ':') *c = '_';
         const char *p = name;
 #else
-        const char *p = getenv("SF2_MISSLOG");
+        const char *p = snes_record_path[0] ? snes_record_path : getenv("SF2_MISSLOG");
 #endif
         if (p) { snprintf(miss_path, sizeof miss_path, "%s", p); miss_seen = calloc(1 << 23, 1); atexit(snes_record_flush); }
     }

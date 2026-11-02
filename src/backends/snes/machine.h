@@ -19,8 +19,10 @@ extern u8 snes_mdr;
 extern int snes_force_interp;
 extern u64 snes_blocks_run, snes_interp_run;
 extern u32 snes_native_cycles, snes_interp_cycles;   /* CPU time by where it ran */
+extern u64 snes_native_total, snes_interp_total;
 extern int snes_recording;            /* log what the interpreter had to run */
 extern u32 snes_recorded;
+extern char snes_record_path[512];    /* where the recorder writes, empty for none */
 void snes_record_flush(void);
 extern void (*snes_register_game)(void);   /* recompiled code of the loaded game */
 typedef struct { unsigned pc; int mx; void (*f)(void); } SnesBlock;

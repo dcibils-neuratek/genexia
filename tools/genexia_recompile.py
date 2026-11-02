@@ -2,7 +2,7 @@
 """
 genexia_recompile.py - one ROM in, one native game library out.
 
-  genexia_recompile.py ROM [--rounds N] [--frames N] [--no-os9] [--push HOST]
+  genexia_recompile.py ROM [--rounds N] [--frames N] [--no-os9] [--push HOST] [--imac HOST]
 
 Inspects the ROM, finds its code (the interpreter, then bots playing, then
 static analysis in the recompiler), compiles it into a library, and checks every
@@ -95,12 +95,14 @@ def run(cmd, env=None, **kw):
     return subprocess.run(cmd, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', **kw)
 
 
-def play(tool, rom, frames, seed, miss, lib=None, interp=False, runner=False):
+def play(tool, rom, frames, seed, miss, lib=None, interp=False, runner=0):
     env = {'SF2_MISSLOG': miss} if miss else {}
     if lib:
         env['SF2_GAMELIB'] = lib
-    if runner:
+    if runner == 1:
         env['SF2_MONKEY_RUN'] = '1'
+    elif runner == 2:
+        env['SF2_MONKEY_MENU'] = '1'
     cmd = [tool, '--frames', str(frames), '--monkey', str(seed), '--rom', rom]
     if interp:
         cmd.insert(1, '--interp')
@@ -115,11 +117,12 @@ def read_cov(path):
 
 def recompile(rom, d):
     r = run([sys.executable, os.path.join(REPO, 'tools/recompile_65816.py'), rom, os.path.join(d, 'code'), '--entries', os.path.join(d, 'coverage.txt'),
-             '--prefix', 'G_', '--register', REGISTER])
+             '--prefix', 'G_', '--register', REGISTER, '--map', os.path.join(d, 'map.json')])
     m = re.search(r'instructions (\d+) \((\d+) bytes\), blocks (\d+)', r.stdout)
     if r.returncode or not m:
         fail('The recompiler stopped: ' + r.stdout[-300:])
     g = re.search(r'followed (\d+) instructions, guessed (\d+)', r.stdout)
+    say(event='map', path=os.path.join(d, 'map.json'))
     return {'instructions': int(m[1]), 'code_bytes': int(m[2]), 'blocks': int(m[3]), 'followed': int(g[1]), 'guessed': int(g[2])}
 
 
@@ -174,19 +177,36 @@ def link_os9(d, game_id):
 
 
 def share(outputs):
-    blocks = interp = 0
+    """% of CPU time in compiled code, and % of frames using Mode 7"""
+    native = emulated = mode7 = frames = 0
     for t in outputs:
-        m = re.search(r'blocks (\d+)\s+interp-steps (\d+)', t)
+        m = re.search(r'cycles native (\d+) emulated (\d+) mode7 (\d+) of (\d+)', t)
         if m:
-            blocks += int(m[1]); interp += int(m[2])
-    return round(100.0 * interp / max(1, blocks + interp), 2)
+            native += int(m[1]); emulated += int(m[2]); mode7 += int(m[3]); frames += int(m[4])
+    return round(100.0 * native / max(1, native + emulated), 2), round(100.0 * mode7 / max(1, frames), 1)
+
+
+def from_imac(host, title, cov):
+    """what the recorder saved while the game was played there; missing is fine"""
+    name = (title[:26] + '.miss').replace(':', '_')
+    try:
+        r = subprocess.run([sys.executable, os.path.join(REPO, 'tools/os9_share.py'), host, 'get', name], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, text=True, errors='replace', timeout=15)
+    except subprocess.TimeoutExpired:
+        return 0
+    if r.returncode:
+        return 0
+    known = read_cov(cov)
+    new = {l.strip() for l in r.stdout.splitlines() if re.fullmatch(r'[0-9A-F]{6} [0-3]', l.strip())} - known
+    open(cov, 'w').write('\n'.join(sorted(known | new)) + '\n')
+    return len(new)
 
 
 def main():
     a = sys.argv[1:]
     if not a:
         sys.exit(__doc__)
-    rom, rounds, frames, os9, host = a[0], 4, 30000, True, None
+    rom, rounds, frames, os9, host, imac = a[0], 4, 30000, True, None, None
     i = 1
     while i < len(a):
         if a[i] == '--no-os9': os9 = False; i += 1; continue
@@ -194,6 +214,7 @@ def main():
         if k == '--rounds': rounds = int(v)
         elif k == '--frames': frames = int(v)
         elif k == '--push': host = v
+        elif k == '--imac': imac = v
         else: sys.exit('bad option ' + k)
     t0 = time.time()
     step('inspect', 'Reading the cartridge')
@@ -227,6 +248,24 @@ def main():
             fail('The game never started in the interpreter.')
         open(cov, 'w').write('\n'.join(sorted(known)) + '\n')
 
+    played = set()
+    for name in ('recorded.txt', 'imac-recorded.txt'):
+        played |= {l for l in read_cov(os.path.join(d, name)) if re.fullmatch(r'[0-9A-F]{6} [0-3]', l)}
+    new = played - read_cov(cov)
+    if new:
+        step('discover', 'Adding what was found by playing')
+        merged = read_cov(cov) | new
+        open(cov, 'w').write('\n'.join(sorted(merged)) + '\n')
+        say(event='recorded', new=len(new))
+    for name in ('recorded.txt', 'imac-recorded.txt'):
+        if os.path.exists(os.path.join(d, name)):
+            os.remove(os.path.join(d, name))
+    if imac:
+        step('discover', 'Looking for recordings on the iMac')
+        got = from_imac(imac, info['title'], cov)
+        if got:
+            say(event='recorded', new=got)
+
     bots = os.cpu_count() or 4
     bots = min(8, max(2, bots))
     outputs = []
@@ -236,7 +275,7 @@ def main():
         lib = link_host(d)
         say(event='stats', round=r + 1, **st)
         step('play', 'Bots playing round %d of %d' % (r + 1, rounds))
-        seeds = [(1000 * (r + 1) + b, b < bots * 3 // 4) for b in range(bots)]
+        seeds = [(1000 * (r + 1) + b, b % 3) for b in range(bots)]
         miss = lambda s: os.path.join(tmp, 'r%d.miss' % s)
         with cf.ThreadPoolExecutor(bots) as ex:
             outputs = list(ex.map(lambda p: play(tool, rom, frames, p[0], miss(p[0]), lib=lib, runner=p[1]), seeds))
@@ -246,7 +285,7 @@ def main():
             new |= read_cov(miss(s))
         new -= known
         open(cov, 'w').write('\n'.join(sorted(known | new)) + '\n')
-        say(event='round', round=r + 1, new=len(new), interpreter_percent=share(outputs))
+        say(event='round', round=r + 1, new=len(new), native_percent=share(outputs)[0])
         if len(new) < 3:
             break
 
@@ -254,6 +293,12 @@ def main():
     st = recompile(rom, d)
     lib = link_host(d)
     say(event='stats', **st)
+
+    step('measure', 'Measuring the finished library')
+    with cf.ThreadPoolExecutor(bots) as ex:
+        outputs = list(ex.map(lambda b: play(tool, rom, frames, 9000 + b, None, lib=lib, runner=b % 3), range(bots)))
+    native, mode7 = share(outputs)
+    say(event='measured', native_percent=native, mode7_percent=mode7)
 
     step('verify', 'Checking each block against the interpreter')
     ls = link_host(d, 'game-check.dylib', ['-DSNES_LOCKSTEP'], '-O1')
@@ -265,14 +310,14 @@ def main():
         fail('The check didn\'t finish: ' + out[-300:])
     say(event='verified', blocks=checked, mismatches=bad)
 
-    native = None
+    native_lib = None
     if os9 and os.path.exists(os.path.join(RETRO68, 'bin/MakePEF')):
         step('os9', 'Compiling for the iMac G4')
-        native = link_os9(d, info['id'])
-        say(event='os9', file=native, bytes=os.path.getsize(native))
-    if host and native:
+        native_lib = link_os9(d, info['id'])
+        say(event='os9', file=native_lib, bytes=os.path.getsize(native_lib))
+    if host and native_lib:
         step('push', 'Sending to the iMac')
-        r = run([sys.executable, os.path.join(REPO, 'tools/os9_share.py'), host, 'push', native, info['id'] + '.lib'])
+        r = run([sys.executable, os.path.join(REPO, 'tools/os9_share.py'), host, 'push', native_lib, info['id'] + '.lib'])
         if r.returncode:
             fail('Couldn\'t reach the iMac at %s.' % host)
 
@@ -280,7 +325,8 @@ def main():
     shutil.rmtree(os.path.join(d, 'obj-game-check.dylib'), ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
     save(status='ready' if not bad else 'mismatch', instructions=st['instructions'], blocks=st['blocks'], addresses=len(read_cov(cov)),
-         interpreter_percent=share(outputs), checked_blocks=checked, mismatches=bad, library=lib, os9_library=native, built=int(time.time()))
+         followed=st['followed'], guessed=st['guessed'], native_percent=native, mode7_percent=mode7,
+         library_bytes=os.path.getsize(lib), os9_bytes=os.path.getsize(native_lib) if native_lib else 0, checked_blocks=checked, mismatches=bad, library=lib, os9_library=native_lib, built=int(time.time()))
     say(event='done', id=info['id'], title=info['title'], seconds=round(time.time() - t0), mismatches=bad)
     sys.exit(0 if not bad else 2)
 

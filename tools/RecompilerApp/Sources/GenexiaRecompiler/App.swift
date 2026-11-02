@@ -11,7 +11,7 @@ struct RecompilerApp: App {
     var body: some Scene {
         WindowGroup("Genexia Recompiler") {
             MainView().environmentObject(store)
-                .frame(minWidth: 860, minHeight: 560)
+                .frame(minWidth: 940, minHeight: 760)
                 .onAppear { NSApp.activate(ignoringOtherApps: true) }
         }
         .windowStyle(.hiddenTitleBar)
@@ -131,6 +131,11 @@ struct GameRow: View {
                     ConsoleBadge(console: game.console)
                 }
                 Spacer()
+                if game.waiting > 0 {
+                    Text("+\(game.waiting)").font(.system(size: 11, weight: .bold, design: .rounded)).monospacedDigit()
+                        .padding(.horizontal, 7).padding(.vertical, 3).background(Color.orange.opacity(0.85), in: Capsule())
+                        .help("New code found by playing, waiting to be compiled")
+                }
             }
             .padding(9)
             .background(store.selection == game.id ? accent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 9))
@@ -144,30 +149,40 @@ struct GameDetail: View {
     let game: Game
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(game.title.capitalized).font(.system(size: 28, weight: .bold, design: .rounded)).lineLimit(1)
-                ConsoleBadge(console: game.console)
-                Spacer()
-            }
-            StepStrip(game: game)
-            if let p = game.problem {
-                Label(p, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-            }
-            HStack(spacing: 12) {
-                Stat(value: game.instructions.formatted(), label: "instructions compiled")
-                Stat(value: String(format: "%.2f%%", game.interpreterPercent), label: "left to the interpreter")
-                Stat(value: game.checkedBlocks == 0 ? "–" : compact(game.checkedBlocks), label: game.mismatches == 0 ? "blocks verified" : "\(game.mismatches) mismatches")
-            }
-            if !game.log.isEmpty {
-                ScrollView {
-                    Text(game.log.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(game.title.capitalized).font(.system(size: 28, weight: .bold, design: .rounded)).lineLimit(1)
+                        ConsoleBadge(console: game.console)
+                        Spacer()
+                    }
+                    StepStrip(game: game)
+                    if let p = game.problem {
+                        Label(p, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    WaitingCard(game: game)
+                    ExplorerView(explorer: store.explorer(for: game.id), building: game.building)
+                    NativeBar(native: game.nativePercent, known: game.nativePercent > 0)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                        Stat(value: game.instructions.formatted(), label: "instructions compiled")
+                        Stat(value: game.followed == 0 ? "–" : "\(game.followed * 100 / max(1, game.instructions))%", label: "seen running or followed")
+                        Stat(value: game.guessed == 0 ? "–" : "\(game.guessed * 100 / max(1, game.instructions))%", label: "guessed, not yet reached")
+                        Stat(value: game.checkedBlocks == 0 ? "–" : compact(game.checkedBlocks), label: game.mismatches == 0 ? "blocks verified" : "\(game.mismatches) mismatches")
+                        Stat(value: size(game.libraryBytes), label: "Mac library")
+                        Stat(value: size(game.os9Bytes), label: "iMac library")
+                    }
+                    OptionsCard(game: game)
+                    if !game.log.isEmpty {
+                        Text(game.log.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                            .padding(10).background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+                    }
                 }
-                .padding(10).background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-            } else { Spacer() }
+                .padding(.horizontal, 28).padding(.top, 34).padding(.bottom, 12)
+            }
             HStack {
                 Button { store.play(game) } label: { Label("Play", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent).tint(accent).disabled(game.building || game.problem != nil)
@@ -175,15 +190,124 @@ struct GameDetail: View {
                     .disabled(game.os9Library == nil || game.building)
                 Button { store.rebuild(game) } label: { Label("Grow again", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(game.building || game.queued)
+                    .help("Keeps everything found so far, adds iMac recordings, sends the bots to play again, recompiles and re-verifies")
                 Spacer()
                 Button { store.reveal(game) } label: { Image(systemName: "folder") }.help("Show the library in Finder")
             }
+            .padding(.horizontal, 28).padding(.vertical, 14)
         }
-        .padding(28).padding(.top, 8)
     }
 
     func compact(_ n: Int) -> String {
         n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1_000_000) : n.formatted()
+    }
+    func size(_ n: Int) -> String {
+        n == 0 ? "–" : String(format: "%.1f MB", Double(n) / 1_048_576)
+    }
+}
+
+/// Share of the game's CPU time in compiled code against the interpreter.
+struct NativeBar: View {
+    let native: Double
+    let known: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(known ? String(format: "%.1f%% native", native) : "Not measured yet").font(.system(size: 17, weight: .semibold, design: .rounded))
+                Spacer()
+                if known { Text(String(format: "%.1f%% emulated", 100 - native)).font(.callout).foregroundStyle(.secondary) }
+            }
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.orange.opacity(known ? 0.55 : 0.1))
+                    Capsule().fill(accent).frame(width: g.size.width * native / 100)
+                }
+            }.frame(height: 10)
+            Text("Share of CPU time while bots play. It can change once real play reaches new areas.").font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// What playing has turned up that the library doesn't have yet.
+struct WaitingCard: View {
+    @EnvironmentObject var store: Store
+    let game: Game
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: game.waiting > 0 ? "sparkles" : "record.circle")
+                .font(.system(size: 22)).foregroundStyle(game.waiting > 0 ? .orange : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(game.waiting > 0 ? "\(game.waiting.formatted()) new code addresses found by playing" : "No new code waiting")
+                    .font(.system(size: 14, weight: .semibold))
+                Text(game.waiting > 0 ? "They run in the interpreter until you compile them." : "Play with recording on and anything new shows up here while you play.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Check iMac") { store.checkIMac(game) }.disabled(game.building || game.queued)
+            Button("Compile") { store.rebuild(game) }
+                .buttonStyle(.borderedProminent).tint(.orange).disabled(game.waiting == 0 || game.building || game.queued)
+        }
+        .padding(14)
+        .background(game.waiting > 0 ? Color.orange.opacity(0.12) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct OptionsCard: View {
+    @EnvironmentObject var store: Store
+    let game: Game
+
+    func binding<T>(_ path: WritableKeyPath<GameOptions, T>) -> Binding<T> {
+        Binding(get: { game.options[keyPath: path] }, set: {
+            var o = game.options
+            o[keyPath: path] = $0
+            store.setOptions(game, o)
+        })
+    }
+
+    var note: String {
+        if game.options.picture < 2 { return "" }
+        if game.mode7Percent >= 1 {
+            return String(format: "Only Mode 7 scenes really get wider: %.0f%% of frames measured. The rest show black side bars.", game.mode7Percent)
+        }
+        return "This game draws no Mode 7 scenes in the frames measured, so it stays its original width with black side bars."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Options for this game").font(.headline)
+            Picker("Picture", selection: binding(\.picture)) {
+                Text("Original").tag(0); Text("4:3 TV").tag(1); Text("16:9").tag(2); Text("Ultrawide 21:9").tag(3)
+            }.pickerStyle(.segmented)
+            if !note.isEmpty { Text(note).font(.caption).foregroundStyle(.secondary) }
+            Picker("Filter", selection: binding(\.filter)) {
+                Text("Sharp").tag(0); Text("Smooth").tag(1); Text("Scanlines").tag(2); Text("CRT").tag(3)
+            }.pickerStyle(.segmented)
+            Picker("Input lag", selection: binding(\.runahead)) {
+                Text("Original").tag(0); Text("1 frame less").tag(1); Text("2 frames less").tag(2)
+            }.pickerStyle(.segmented)
+            Toggle("Record new code while playing (F8 in game)", isOn: Binding(get: { game.options.record != 0 }, set: { v in
+                var o = game.options
+                o.record = v ? 1 : 0
+                store.setOptions(game, o)
+            }))
+            Toggle("Remove sprite flicker", isOn: Binding(get: { game.options.sprites != 0 }, set: { v in
+                var o = game.options
+                o.sprites = v ? 1 : 0
+                store.setOptions(game, o)
+            }))
+            HStack {
+                Text("Speed")
+                Slider(value: Binding(get: { Double(game.options.speed) }, set: { v in
+                    var o = game.options
+                    o.speed = Int(v)
+                    store.setOptions(game, o)
+                }), in: 50...200, step: 10)
+                Text("\(game.options.speed)%").monospacedDigit().frame(width: 44, alignment: .trailing)
+            }
+            Text("Applies on this Mac. The iMac keeps its own settings.").font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

@@ -10,7 +10,14 @@ struct Game: Identifiable, Equatable {
     var status: String = "ready"
     var instructions: Int = 0
     var addresses: Int = 0
-    var interpreterPercent: Double = 0
+    var nativePercent: Double = 0
+    var mode7Percent: Double = 0
+    var followed: Int = 0
+    var guessed: Int = 0
+    var libraryBytes: Int = 0
+    var os9Bytes: Int = 0
+    var options = GameOptions()
+    var waiting = 0            // addresses found by playing, not compiled yet
     var checkedBlocks: Int = 0
     var mismatches: Int = 0
     var os9Library: String? = nil
@@ -30,9 +37,43 @@ let buildSteps: [(id: String, title: String, icon: String)] = [
     ("discover", "Find code", "point.topleft.down.curvedto.point.bottomright.up"),
     ("compile", "Compile", "cpu"),
     ("play", "Bots play", "gamecontroller"),
+    ("measure", "Measure", "gauge.with.needle"),
     ("verify", "Verify", "checkmark.seal"),
     ("os9", "iMac library", "desktopcomputer"),
 ]
+
+/// What Genexia applies when this game starts, kept in options.txt beside its library.
+struct GameOptions: Equatable {
+    var picture = 0     // 0 square pixels, 1 4:3 TV, 2 16:9, 3 ultrawide
+    var filter = 0      // sharp, smooth, scanlines, CRT
+    var sprites = 1     // 1 removes the hardware's per-line limit
+    var runahead = 0
+    var speed = 100
+    var record = 1
+
+    init() {}
+    init(file: URL) {
+        guard let t = try? String(contentsOf: file, encoding: .utf8) else { return }
+        for line in t.split(separator: "\n") {
+            let p = line.split(separator: " ")
+            guard p.count == 2, let v = Int(p[1]) else { continue }
+            switch p[0] {
+            case "picture": picture = v
+            case "filter": filter = v
+            case "sprites": sprites = v
+            case "runahead": runahead = v
+            case "speed": speed = v
+            case "record": record = v
+            default: break
+            }
+        }
+    }
+
+    func save(to file: URL) {
+        let t = "picture \(picture)\nfilter \(filter)\nsprites \(sprites)\nrunahead \(runahead)\nspeed \(speed)\nrecord \(record)\n"
+        try? t.write(to: file, atomically: true, encoding: .utf8)
+    }
+}
 
 @MainActor
 final class Store: ObservableObject {
@@ -51,7 +92,41 @@ final class Store: ObservableObject {
             .appendingPathComponent("Library/Application Support/Genexia/games")
     }
 
-    init() { reload() }
+    init() {
+        reload()
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.countWaiting() }
+        }
+    }
+
+    private func addresses(_ url: URL) -> Set<Substring> {
+        guard let t = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return Set(t.split(separator: "\n").filter { $0.count == 8 })
+    }
+
+    /// Genexia adds to recorded.txt during play, so this keeps up while a game runs.
+    func countWaiting() {
+        for i in games.indices where !games[i].building && !games[i].id.hasPrefix("drop-") {
+            let d = gamesDir.appendingPathComponent(games[i].id)
+            let played = addresses(d.appendingPathComponent("recorded.txt")).union(addresses(d.appendingPathComponent("imac-recorded.txt")))
+            let n = played.isEmpty ? 0 : played.subtracting(addresses(d.appendingPathComponent("coverage.txt"))).count
+            if games[i].waiting != n { games[i].waiting = n }
+        }
+    }
+
+    func checkIMac(_ game: Game) {
+        let name = String(game.title.prefix(26)).replacingOccurrences(of: ":", with: "_") + ".miss"
+        var lines: [String] = []
+        banner = "Asking the iMac what was recorded…"
+        run(["python3", repo + "/tools/os9_share.py", imacHost, "get", name], onLine: { lines.append($0) }) { [weak self] code in
+            guard let self else { return }
+            guard code == 0 else { self.banner = "No recording from the iMac for \(game.title)."; return }
+            let file = self.gamesDir.appendingPathComponent(game.id).appendingPathComponent("imac-recorded.txt")
+            try? (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+            self.countWaiting()
+            self.banner = "iMac recording checked."
+        }
+    }
 
     func reload() {
         let dirs = (try? FileManager.default.contentsOfDirectory(at: gamesDir, includingPropertiesForKeys: nil)) ?? []
@@ -64,7 +139,13 @@ final class Store: ObservableObject {
             g.status = j["status"] as? String ?? "ready"
             g.instructions = j["instructions"] as? Int ?? 0
             g.addresses = j["addresses"] as? Int ?? 0
-            g.interpreterPercent = j["interpreter_percent"] as? Double ?? 0
+            g.nativePercent = (j["native_percent"] as? NSNumber)?.doubleValue ?? 0
+            g.mode7Percent = (j["mode7_percent"] as? NSNumber)?.doubleValue ?? 0
+            g.followed = j["followed"] as? Int ?? 0
+            g.guessed = j["guessed"] as? Int ?? 0
+            g.libraryBytes = j["library_bytes"] as? Int ?? 0
+            g.os9Bytes = j["os9_bytes"] as? Int ?? 0
+            g.options = GameOptions(file: d.appendingPathComponent("options.txt"))
             g.checkedBlocks = j["checked_blocks"] as? Int ?? 0
             g.mismatches = j["mismatches"] as? Int ?? 0
             g.os9Library = j["os9_library"] as? String
@@ -76,6 +157,7 @@ final class Store: ObservableObject {
             if let i = found.firstIndex(where: { $0.id == g.id }) { found[i] = g } else { found.append(g) }
         }
         games = found.sorted { $0.title < $1.title }
+        countWaiting()
     }
 
     private func update(_ id: String, _ change: (inout Game) -> Void) {
@@ -107,7 +189,7 @@ final class Store: ObservableObject {
         queue.removeFirst()
         running = true
         update(id) { $0.queued = false; $0.building = true; $0.done = [] }
-        let args = ["python3", repo + "/tools/genexia_recompile.py", g.romPath]
+        let args = ["python3", repo + "/tools/genexia_recompile.py", g.romPath, "--imac", imacHost]
         run(args) { [weak self] line in self?.event(id, line) } finished: { [weak self] code in
             guard let self else { return }
             let current = self.games.first { $0.id == id || $0.romPath == g.romPath }?.id ?? id
@@ -138,8 +220,11 @@ final class Store: ObservableObject {
                 g.console = e["console"] as? String ?? ""
                 g.id = realID
             }
+            if let x = explorers[live] { explorers[realID] = x }
             games.removeAll { $0.id == realID && !$0.building }
             if selection == live { selection = realID }
+        case "map":
+            if let path = e["path"] as? String { explorer(for: live).load(URL(fileURLWithPath: path)) }
         case "stats":
             update(live) { g in
                 g.instructions = e["instructions"] as? Int ?? g.instructions
@@ -147,8 +232,16 @@ final class Store: ObservableObject {
             }
         case "round":
             update(live) { g in
-                g.interpreterPercent = e["interpreter_percent"] as? Double ?? 0
-                g.log.append("Round \(e["round"] ?? ""): \(e["new"] ?? 0) new addresses, \(g.interpreterPercent)% interpreted")
+                g.nativePercent = (e["native_percent"] as? NSNumber)?.doubleValue ?? 0
+                g.log.append("Round \(e["round"] ?? ""): \(e["new"] ?? 0) new addresses, \(g.nativePercent)% native")
+            }
+        case "recorded":
+            update(live) { g in g.log.append("\(e["new"] ?? 0) new addresses recorded on the iMac") }
+        case "measured":
+            update(live) { g in
+                g.nativePercent = (e["native_percent"] as? NSNumber)?.doubleValue ?? 0
+                g.mode7Percent = (e["mode7_percent"] as? NSNumber)?.doubleValue ?? 0
+                g.log.append("Measured \(g.nativePercent)% native")
             }
         case "verified":
             update(live) { g in
@@ -162,6 +255,20 @@ final class Store: ObservableObject {
             update(live) { g in g.problem = e["message"] as? String }
         default: break
         }
+    }
+
+    private var explorers: [String: RomExplorer] = [:]
+    func explorer(for id: String) -> RomExplorer {
+        if let x = explorers[id] { return x }
+        let x = RomExplorer()
+        explorers[id] = x
+        x.load(gamesDir.appendingPathComponent(id).appendingPathComponent("map.json"), instant: true)
+        return x
+    }
+
+    func setOptions(_ game: Game, _ options: GameOptions) {
+        update(game.id) { $0.options = options }
+        options.save(to: gamesDir.appendingPathComponent(game.id).appendingPathComponent("options.txt"))
     }
 
     func play(_ game: Game) {
