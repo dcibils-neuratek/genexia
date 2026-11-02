@@ -626,9 +626,11 @@ void r4300_recomp_add(u32 pc, R4Block fn, const u32 *words, u32 n) {
     rec_head[i] = ++rec_n;
 }
 
-#ifdef GENEXIA_OS9
-long long r4300_native_cycles, r4300_interp_cycles;
+long long r4300_native_cycles, r4300_interp_cycles;   /* CPU time by where it ran */
+int r4300_recording = 1;
+u32 r4300_recorded;
 
+#ifdef GENEXIA_OS9
 /* These chips have no fsqrt: the estimate instruction and Newton's steps. */
 double r4_sqrt(double x) {
     if (!(x > 0) || x > 1.7e308) return x == 0 || x > 0 ? x : __builtin_nan("");
@@ -741,12 +743,18 @@ static R4Block rec_find(u32 pc) {
     return NULL;
 }
 
+static u8 rec_seen[REC_SLOTS / 8];
+/* an overlay arrived here: what runs at these addresses is new code */
+void r4300_recomp_unseen(u32 pa, u32 n) {
+    for (u32 i = pa >> 2; i < (pa + n) >> 2 && i < REC_SLOTS; i++) rec_seen[i >> 3] &= (u8)~(1 << (i & 7));
+}
+
 static void rec_log_miss(u32 pc) {
-    static u8 seen[REC_SLOTS / 8];
+    u8 *seen = rec_seen;
     u32 i = (pc & 0x7FFFFFu) >> 2;
     if (seen[i >> 3] & (1 << (i & 7))) return;
     seen[i >> 3] |= (u8)(1 << (i & 7));
-    if (rec_rom_of[i]) fprintf(rec_log, "B %08X %07X\n", pc, rec_rom_of[i]);
+    if (rec_rom_of[i]) { fprintf(rec_log, "B %08X %07X\n", pc, rec_rom_of[i]); r4300_recorded++; }
 }
 
 /* ---------------------------------------------------------------- reset */
@@ -937,9 +945,7 @@ static int lk_run(R4Block fn, u32 pc, int used) {
 #endif
 
 int r4300_run(int cycles) {
-#ifdef GENEXIA_OS9
     int cycles_seen = 0;
-#endif
     u64 *const gpr = r4300_gpr;
     u32 *const cop0 = r4300_cop0;
     u8 *const ram = n64_rdram;
@@ -994,15 +1000,11 @@ int r4300_run(int cycles) {
 #ifdef R4_LOCKSTEP
                     used = lk_run(fn, pc, used);
 #else
-#ifdef GENEXIA_OS9
                     r4300_interp_cycles += used - cycles_seen;
                     cycles_seen = used;
-#endif
                     used = fn(used);
-#ifdef GENEXIA_OS9
                     r4300_native_cycles += used - cycles_seen;
                     cycles_seen = used;
-#endif
 #endif
                     pc = r4_pc;
                     npc = pc + 4;
@@ -1012,7 +1014,7 @@ int r4300_run(int cycles) {
                     after_bail = 0;
                     continue;
                 }
-                if (unlikely(rec_log != NULL) && (pc != cur + 4 || after_bail)) rec_log_miss(pc);
+                if (unlikely(rec_log != NULL) && r4300_recording && (pc != cur + 4 || after_bail)) rec_log_miss(pc);
                 after_bail = 0;
             }
         }
@@ -1528,6 +1530,7 @@ int r4300_run(int cycles) {
         nds = 0;
     }
 
+    r4300_interp_cycles += used - cycles_seen;
     count_sync(used);
     cop0[C0_RANDOM] = random_value();
     gpr[0] = 0;

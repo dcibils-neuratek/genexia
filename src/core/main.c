@@ -26,6 +26,7 @@
 #include "snes.h"
 #include "machine.h"
 #include "n64_machine.h"
+#include "r4300_recomp.h"
 #include "version.h"
 #include "enhance.h"
 
@@ -181,6 +182,9 @@ static void monkey_input(unsigned *rng, int f) {
         mk.held[1] = (u16)(*rng >> 8) & 0x7FF & ~PAD_START;
         mk.hold = 2 + (int)((*rng >> 24) & 15);
     }
+    /* the N64 is played with the stick */
+    n64_stick_x[0] = (u8)(s8)((int)(mk.held[1] & 0xFF) - 128);
+    n64_stick_y[0] = (u8)(s8)((int)(mk.held[1] >> 3 & 0xFF) - 128);
     int ph = f % 9000;
     if (getenv("SF2_MONKEY_MENU")) {    /* menus: Start and A in turn, wandering between them */
         u16 b = (f % 90) < 4 ? PAD_START : (f % 90) >= 45 && (f % 90) < 49 ? PAD_A : (f % 90) >= 20 && (f % 90) < 24 ? (u16)(1u << ((mk.held[0] >> 4) & 3)) : 0;
@@ -503,6 +507,15 @@ static void reset_snes(void) { vdp_init(); snes_reset(); }
 static const Backend backend_genesis = { "Genesis", YM_SAMPLE_RATE, 4.0, reset_genesis, run_frame_genesis };
 static const Backend backend_snes = { "SNES", SNES_DSP_RATE, 1.8, reset_snes, run_frame_snes };
 static void reset_n64(void) { vdp_init(); n64_reset(); }
+/* a library from the Genexia Recompiler beats code built into the app */
+static void *game_library(void) {
+    char p[1200] = "";
+    if (getenv("SF2_GAMELIB")) snprintf(p, sizeof p, "%s", getenv("SF2_GAMELIB"));
+    else if (pack_dir[0]) snprintf(p, sizeof p, "%sgame.dylib", pack_dir);
+    else if (getenv("HOME") && !getenv("SF2_NOGAMELIB"))
+        snprintf(p, sizeof p, "%s/Library/Application Support/Genexia/games/%08X/game.dylib", getenv("HOME"), snes_rom_crc());
+    return p[0] ? dlopen(p, RTLD_NOW) : NULL;
+}
 static Backend backend_n64 = { "Nintendo 64", 32000, 1.0, reset_n64, run_frame_n64 };
 
 static void configure_game(int region_set) {
@@ -518,7 +531,11 @@ static void configure_game(int region_set) {
         /* recompiled code for this exact ROM, if we have it */
         n64_register_game = !strcmp(game_title, "SUPER MARIO 64") && rom[0x10] == 0x63 && rom[0x11] == 0x5A
                             ? recomp_register_sm64 : NULL;
-        n64_force_interp = m68k_force_interp || !n64_register_game;
+        n64_game_lib = NULL;
+        void *lib = probing ? NULL : game_library();
+        if (lib && (n64_game_lib = (N64GameEntry)dlsym(lib, "genexia_game"))) n64_register_game = NULL;
+        /* the recorder runs on the interpreter's misses, so it needs no game code yet */
+        n64_force_interp = m68k_force_interp || !(n64_register_game || n64_game_lib || getenv("SF2_MISSLOG"));
         state_on_load = n64_state_loaded;
         if (!probing) fprintf(stderr, "Game: %s  (Nintendo 64, %s)\n", game_title, n64_force_interp ? "interpreter" : "recompiled");
         return;
@@ -533,14 +550,8 @@ static void configure_game(int region_set) {
                              ? recomp_register_smk
                              : !strcmp(game_title, "DONKEY KONG COUNTRY") && rom[0xFFDE] == 0xCC && rom[0xFFDF] == 0x2B
                              ? recomp_register_dkc : NULL;
-        /* a library from the Genexia Recompiler beats code built into the app */
-        char lib_path[1200] = "";
-        if (getenv("SF2_GAMELIB")) snprintf(lib_path, sizeof lib_path, "%s", getenv("SF2_GAMELIB"));
-        else if (pack_dir[0]) snprintf(lib_path, sizeof lib_path, "%sgame.dylib", pack_dir);
-        else if (getenv("HOME") && !getenv("SF2_NOGAMELIB"))
-            snprintf(lib_path, sizeof lib_path, "%s/Library/Application Support/Genexia/games/%08X/game.dylib", getenv("HOME"), snes_rom_crc());
         snes_game_lib = NULL;
-        void *lib = lib_path[0] ? dlopen(lib_path, RTLD_NOW) : NULL;
+        void *lib = game_library();
         if (lib && (snes_game_lib = (SnesGameEntry)dlsym(lib, "genexia_game"))) snes_register_game = NULL;
         snes_force_interp = m68k_force_interp || !(snes_register_game || snes_game_lib);
         if (!probing) fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
@@ -1136,8 +1147,8 @@ static void on_signal(int s) { (void)s; quit_req = 1; }
 static void battery_file(int write) {
     char p[1200];
     u32 size;
-    u8 *ram = snes_sram(&size);
-    if (!pack_save[0] || be != &backend_snes || size <= 1) return;
+    u8 *ram = be == &backend_n64 ? n64_eeprom(&size) : snes_sram(&size);
+    if (!pack_save[0] || (be != &backend_snes && be != &backend_n64) || size <= 1) return;
     snprintf(p, sizeof p, "%sbattery.srm", pack_save);
     FILE *f = fopen(p, write ? "wb" : "rb");
     if (!f) return;
@@ -1243,19 +1254,21 @@ int main(int argc, char **argv) {
     snprintf(key_wide, sizeof key_wide, "wide_%02X%02X", rom[0x18E], rom[0x18F]);
     snprintf(key_limit, sizeof key_limit, "limit_%02X%02X", rom[0x18E], rom[0x18F]);
     int enhanced = vdp_hud_rules != 0 || (be == &backend_snes && (snes_register_game || snes_game_lib));
+    const int library_console = be == &backend_snes || be == &backend_n64;
     if (be == &backend_n64 && !runahead_cli) runahead = 0;   /* 8 MB per snapshot: opt-in */
     vdp_widescreen = wide_opt >= 0 ? wide_opt : settings_get(key_wide, enhanced);
     vdp_no_sprite_limit = limit_opt >= 0 ? limit_opt : settings_get(key_limit, enhanced);
-    if (!headless && be == &backend_snes && getenv("HOME")) {    /* set per game in the Genexia Recompiler */
+    if (!headless && library_console && getenv("HOME")) {    /* set per game in the Genexia Recompiler */
         char p[1200], k[32];
         int v;
         if (pack_dir[0]) snprintf(p, sizeof p, "%soptions.txt", pack_dir);
         else snprintf(p, sizeof p, "%s/Library/Application Support/Genexia/games/%08X/options.txt", getenv("HOME"), snes_rom_crc());
+        if (pack_dir[0]) enh_aspect = 0;       /* a packaged game has no business with this Mac's settings */
         FILE *o = fopen(p, "r");
         if (o) {
             settings_path[0] = 0;              /* this run's choices aren't the player's defaults */
             while (fscanf(o, "%31s %d", k, &v) == 2) {
-                if (!strcmp(k, "picture")) { vdp_widescreen = v >= 2 ? v - 1 : 0; pic_shape = v == 1; }
+                if (!strcmp(k, "picture")) { vdp_widescreen = v >= 2 ? v - 1 : 0; pic_shape = v == 1; enh_aspect = v >= 2 ? v - 1 : 0; }
                 else if (!strcmp(k, "filter")) video_filter = v % FILTER_COUNT;
                 else if (!strcmp(k, "sprites")) vdp_no_sprite_limit = v;
                 else if (!strcmp(k, "runahead")) runahead = v % 3;
@@ -1265,11 +1278,15 @@ int main(int argc, char **argv) {
             fclose(o);
         }
     }
-    if (be == &backend_snes && !pack_dir[0] && (!headless || getenv("SF2_RECORD_TEST")) && getenv("HOME") && !getenv("SF2_MISSLOG")) {
+    if (library_console && !pack_dir[0] && (!headless || getenv("SF2_RECORD_TEST")) && getenv("HOME") && !getenv("SF2_MISSLOG")) {
         char dir[440];                         /* a built game grows from being played */
         snprintf(dir, sizeof dir, "%s/Library/Application Support/Genexia/games/%08X", getenv("HOME"), snes_rom_crc());
         struct stat st;
         if (!stat(dir, &st)) snprintf(snes_record_path, sizeof snes_record_path, "%s/recorded.txt", dir);
+        if (be == &backend_n64) {
+            snprintf(n64_record_path, sizeof n64_record_path, "%s", snes_record_path);
+            r4300_recording = snes_recording;
+        }
     }
     power_on();
     if (wav) wav_open(wav);
@@ -1413,6 +1430,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "frames %d  blocks %llu  interp-steps %llu  pc %06X\n", frames,
                 (unsigned long long)(m68k_blocks_run + snes_blocks_run),
                 (unsigned long long)(m68k_interp_run + snes_interp_run), cpu.pc);
+        if (be == &backend_n64) {
+            fprintf(stderr, "cycles native %lld emulated %lld mode7 0 of %d\n", r4300_native_cycles, r4300_interp_cycles, frames);
+            fprintf(stderr, "state hash %016llX\n", (unsigned long long)n64_state_hash());
+            fprintf(stderr, "fpu fr %d\n", (int)(r4300_cop0[12] >> 26 & 1));
+        }
         if (be == &backend_snes) {
             extern u32 snes_frames_total, snes_frames_mode7;
             fprintf(stderr, "cycles native %llu emulated %llu mode7 %u of %u\n", (unsigned long long)snes_native_total, (unsigned long long)snes_interp_total, snes_frames_mode7, snes_frames_total);
@@ -1509,7 +1531,7 @@ int main(int argc, char **argv) {
                 case SDL_SCANCODE_F6: runahead = (runahead + 1) % 3; last_speed = -1; break;
                 case SDL_SCANCODE_F5: state_write_file(state_path); break;
                 case SDL_SCANCODE_F8:
-                    if (snes_record_path[0]) { snes_recording = !snes_recording; snes_record_flush(); rec_shown = SDL_GetTicks() + 2500; }
+                    if (snes_record_path[0]) { r4300_recording = snes_recording = !snes_recording; snes_record_flush(); rec_shown = SDL_GetTicks() + 2500; }
                     break;
                 case SDL_SCANCODE_F7: state_read_file(state_path); break;
                 case SDL_SCANCODE_MINUS: case SDL_SCANCODE_KP_MINUS:
@@ -1686,14 +1708,15 @@ int main(int argc, char **argv) {
                 crt_draw(ren, show, &src, &dst, src.w * vdp_screen_h / src.h, vdp_screen_h);
         }
         if (SDL_GetTicks() < osd_until || dragging) draw_osd(ren, win);
-        if (snes_record_path[0] && be == &backend_snes && (snes_recording || SDL_GetTicks() < rec_shown)) {
+        if (snes_record_path[0] && library_console && (snes_recording || SDL_GetTicks() < rec_shown)) {
             static u32 seen, fresh_until;      /* a badge in the corner, bright while new code turns up */
-            if (snes_recorded != seen) { seen = snes_recorded; fresh_until = SDL_GetTicks() + 1500; }
+            const u32 recorded = snes_recorded + r4300_recorded;
+            if (recorded != seen) { seen = recorded; fresh_until = SDL_GetTicks() + 1500; }
             int bw, bh, px;
             SDL_GetRendererOutputSize(ren, &bw, &bh);
             px = bh / 300 > 2 ? bh / 300 : 2;
             char t[32];
-            if (snes_recording) snprintf(t, sizeof t, "REC %u", (unsigned)snes_recorded);
+            if (snes_recording) snprintf(t, sizeof t, "REC %u", (unsigned)recorded);
             else snprintf(t, sizeof t, "REC OFF");
             int w = (int)strlen(t) * 4 * px, x = bw - w - 8 * px;
             int lit = snes_recording && (SDL_GetTicks() < fresh_until || (SDL_GetTicks() / 600) % 2);

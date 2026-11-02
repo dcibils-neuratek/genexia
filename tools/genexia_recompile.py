@@ -26,8 +26,10 @@ GAMES = os.path.expanduser('~/Library/Application Support/Genexia/games')
 RETRO68 = os.path.expanduser('~/retro68-work/Retro68-build/toolchain')
 INCS = ['-I' + os.path.join(REPO, d) for d in ('build', 'src', 'src/core', 'src/chips', 'src/backends/genesis',
                                               'src/backends/snes', 'src/backends/n64')]
-GAMELIB = os.path.join(REPO, 'src/backends/snes/gamelib.c')
+GAMELIB = {'SNES': os.path.join(REPO, 'src/backends/snes/gamelib.c'), 'Nintendo 64': os.path.join(REPO, 'src/backends/n64/gamelib.c')}
 REGISTER = 'recomp_register_game'
+CONSOLE = None
+fpu_mode = 1
 # SNES cartridge chips Genexia doesn't have, by the header's type byte
 SNES_CHIPS = {0x13: 'Super FX', 0x14: 'Super FX', 0x15: 'Super FX', 0x1A: 'Super FX', 0x23: 'OBC-1', 0x34: 'SA-1', 0x35: 'SA-1',
               0x43: 'S-DD1', 0x45: 'S-DD1', 0x55: 'S-RTC', 0xE3: 'Super Game Boy', 0xE5: 'Satellaview', 0xF3: 'CX4', 0xF5: 'custom chip', 0xF6: 'custom chip', 0xF9: 'SPC7110'}
@@ -57,6 +59,16 @@ def snes_score(rom, base):
     return s
 
 
+def big_endian(rom):
+    """N64 dumps come in three byte orders. Genexia names a game after this one."""
+    b = bytearray(rom)
+    if rom[:4] == b'\x37\x80\x40\x12':
+        b[0::2], b[1::2] = b[1::2], b[0::2]
+    elif rom[:4] == b'\x40\x12\x37\x80':
+        b[0::4], b[1::4], b[2::4], b[3::4] = b[3::4], b[2::4], b[1::4], b[0::4]
+    return bytes(b)
+
+
 def inspect(path):
     rom = open(path, 'rb').read()
     info = {'rom': os.path.abspath(path), 'size': len(rom), 'console': None, 'title': os.path.splitext(os.path.basename(path))[0],
@@ -65,9 +77,9 @@ def inspect(path):
         rom = rom[512:]
     if rom[:4] in (b'\x80\x37\x12\x40', b'\x37\x80\x40\x12', b'\x40\x12\x37\x80'):
         info['console'] = 'Nintendo 64'
-        if rom[:4] == b'\x80\x37\x12\x40':
-            info['title'] = rom[0x20:0x34].decode('ascii', 'replace').strip() or info['title']
-        info['problem'] = 'Nintendo 64 games can\'t be built as libraries yet.'
+        rom = big_endian(rom)
+        info['title'] = rom[0x20:0x34].decode('ascii', 'replace').strip(' \0') or info['title']
+        info['supported'] = True
     elif rom[0x100:0x104] == b'SEGA':
         info['console'] = 'Genesis'
         info['title'] = rom[0x150:0x180].decode('ascii', 'replace').strip() or info['title']
@@ -97,6 +109,8 @@ def run(cmd, env=None, **kw):
 
 def play(tool, rom, frames, seed, miss, lib=None, interp=False, runner=0):
     env = {'SF2_MISSLOG': miss} if miss else {}
+    if not lib:
+        env['SF2_NOGAMELIB'] = '1'
     if lib:
         env['SF2_GAMELIB'] = lib
     if runner == 1:
@@ -112,10 +126,32 @@ def play(tool, rom, frames, seed, miss, lib=None, interp=False, runner=0):
 def read_cov(path):
     if not os.path.exists(path):
         return set()
-    return {l.strip() for l in open(path) if len(l.split()) == 2}
+    return {l.strip() for l in open(path) if len(l.split()) == 2 or l[:2] in ('B ', 'D ')}
+
+
+def read_fpu_mode(tool, rom):
+    """A block only runs in the FPU register mode it was generated for, so a wrong
+    guess is safe but leaves every float in the interpreter. Ask the running game."""
+    m = re.search(r'fpu fr (\d)', play(tool, rom, 600, 1, None))
+    if not m:
+        fail('The game never started in the interpreter.')
+    return int(m[1])
+
+
+def recompile_n64(rom, d):
+    r = run([sys.executable, os.path.join(REPO, 'tools/recompile_mips.py'), rom, os.path.join(d, 'code'), '--entries', os.path.join(d, 'coverage.txt'),
+             '--prefix', 'G_', '--register', REGISTER, '--map', os.path.join(d, 'map.json'), '--fr', str(fpu_mode)])
+    m = re.search(r'(\d+) blocks, (\d+) instructions', r.stdout)
+    if r.returncode or not m:
+        fail('The recompiler stopped: ' + r.stdout[-300:])
+    say(event='map', path=os.path.join(d, 'map.json'))
+    n = int(m[2])
+    return {'instructions': n, 'code_bytes': n * 4, 'blocks': int(m[1]), 'followed': n, 'guessed': 0}
 
 
 def recompile(rom, d):
+    if CONSOLE == 'Nintendo 64':
+        return recompile_n64(rom, d)
     r = run([sys.executable, os.path.join(REPO, 'tools/recompile_65816.py'), rom, os.path.join(d, 'code'), '--entries', os.path.join(d, 'coverage.txt'),
              '--prefix', 'G_', '--register', REGISTER, '--map', os.path.join(d, 'map.json')])
     m = re.search(r'instructions (\d+) \((\d+) bytes\), blocks (\d+)', r.stdout)
@@ -128,7 +164,7 @@ def recompile(rom, d):
 
 def sources(d):
     c = os.path.join(d, 'code')
-    return [GAMELIB] + sorted(os.path.join(c, f) for f in os.listdir(c) if f.endswith('.c'))
+    return [GAMELIB[CONSOLE]] + sorted(os.path.join(c, f) for f in os.listdir(c) if f.endswith('.c'))
 
 
 def compile_all(cc, flags, objdir, srcs):
@@ -139,7 +175,9 @@ def compile_all(cc, flags, objdir, srcs):
         if os.path.exists(o) and os.path.getmtime(o) >= os.path.getmtime(s):
             r = None
         else:
-            r = run([cc] + flags + ['-c', s, '-o', o])
+            # one giant list of calls: optimizing it takes minutes and gains nothing
+            extra = ['-O0'] if s.endswith('recomp_register.c') else []
+            r = run([cc] + flags + extra + ['-c', s, '-o', o])
         if r and r.returncode:
             fail('Compiling failed: ' + r.stdout[-400:])
         return o
@@ -151,7 +189,7 @@ def link_host(d, name='game.dylib', extra=(), opt='-O2'):
     objs = compile_all('clang', [opt, '-std=gnu11', '-w', '-fPIC', '-DGAME_LIB', '-DGAME_REGISTER=' + REGISTER] + list(extra) + INCS,
                        os.path.join(d, 'obj-' + name), sources(d))
     out = os.path.join(d, name)
-    r = run(['clang', '-dynamiclib', '-o', out] + objs)
+    r = run(['clang', '-dynamiclib', '-Wl,-exported_symbol,_genexia_game', '-o', out] + objs)
     if r.returncode:
         fail('Linking failed: ' + r.stdout[-400:])
     return out
@@ -202,6 +240,26 @@ def from_imac(host, title, cov):
     return len(new)
 
 
+def verify_n64(tool, rom, lib, bots):
+    """The block code is exact to the cycle, so the same inputs must leave the whole
+    machine the same: every byte of RAM after the library and the interpreter ran."""
+    frames = 6000
+
+    def race(b):
+        seed, runner = 7000 + b, b % 3
+        hashes = []
+        for kw in ({'lib': lib}, {'interp': True}):
+            out = play(tool, rom, frames, seed, None, runner=runner, **kw)
+            m = re.search(r'state hash (\w+)', out)
+            if not m:
+                fail('The check didn\'t finish: ' + out[-300:])
+            hashes.append(m[1])
+        return hashes[0] != hashes[1]
+    with cf.ThreadPoolExecutor(bots) as ex:
+        results = list(ex.map(race, range(min(bots, 6))))
+    return frames * len(results), sum(results)
+
+
 def main():
     a = sys.argv[1:]
     if not a:
@@ -222,6 +280,10 @@ def main():
     say(event='inspected', **info)
     if not info['supported']:
         fail(info['problem'])
+    global CONSOLE, fpu_mode
+    CONSOLE = info['console']
+    n64 = CONSOLE == 'Nintendo 64'
+    os9 = os9 and not n64
     d = os.path.join(GAMES, info['id'])
     os.makedirs(d, exist_ok=True)
     cov = os.path.join(d, 'coverage.txt')
@@ -231,18 +293,20 @@ def main():
         with open(os.path.join(d, 'info.json'), 'w') as f:
             json.dump(info, f, indent=1)
     save(status='building')
-    tool = os.path.join(REPO, 'genexia')
+    tool = os.path.join(REPO, 'genexia-runtime' if n64 else 'genexia')
     lockstep = os.path.join(REPO, 'genexia-lockstep')
-    if not os.path.exists(tool) or not os.path.exists(lockstep):
-        fail('Build Genexia first: make genexia smk-lockstep')
+    if not os.path.exists(tool) or not (n64 or os.path.exists(lockstep)):
+        fail('Build Genexia first: make genexia genexia-runtime smk-lockstep')
     tmp = os.path.join(d, 'tmp')
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
+    if n64:
+        fpu_mode = read_fpu_mode(tool, rom)
 
     step('discover', 'Following the game from power-on in the interpreter')
     if not read_cov(cov):
         boot = os.path.join(tmp, 'boot.miss')
-        play(tool, rom, 1500, 1, boot, interp=True)
+        play(tool, rom, 1500, 1, boot, interp=not n64)
         known = read_cov(boot)
         if not known:
             fail('The game never started in the interpreter.')
@@ -250,7 +314,7 @@ def main():
 
     played = set()
     for name in ('recorded.txt', 'imac-recorded.txt'):
-        played |= {l for l in read_cov(os.path.join(d, name)) if re.fullmatch(r'[0-9A-F]{6} [0-3]', l)}
+        played |= {l for l in read_cov(os.path.join(d, name)) if re.fullmatch(r'[0-9A-F]{6} [0-3]|[BD] [0-9A-F ]+', l)}
     new = played - read_cov(cov)
     if new:
         step('discover', 'Adding what was found by playing')
@@ -286,7 +350,7 @@ def main():
         new -= known
         open(cov, 'w').write('\n'.join(sorted(known | new)) + '\n')
         say(event='round', round=r + 1, new=len(new), native_percent=share(outputs)[0])
-        if len(new) < 3:
+        if sum(l[0] != 'D' or len(l.split()) == 2 for l in new) < 3:
             break
 
     step('compile', 'Final compile')
@@ -300,14 +364,19 @@ def main():
     native, mode7 = share(outputs)
     say(event='measured', native_percent=native, mode7_percent=mode7)
 
-    step('verify', 'Checking each block against the interpreter')
-    ls = link_host(d, 'game-check.dylib', ['-DSNES_LOCKSTEP'], '-O1')
-    out = run([lockstep, '--frames', '3000', '--monkey', '7', '--rom', rom], {'SF2_GAMELIB': ls, 'SF2_MONKEY_RUN': '1'}).stdout
-    bad = len(re.findall(r'^block ', out, re.M))
-    m = re.search(r'blocks (\d+)', out[out.rfind('frames '):]) if 'frames ' in out else None
-    checked = int(m[1]) if m else 0
-    if not checked:
-        fail('The check didn\'t finish: ' + out[-300:])
+    if n64:
+        step('verify', 'Racing the library against the interpreter')
+        checked, bad = verify_n64(tool, rom, lib, bots)
+    else:
+        step('verify', 'Checking each block against the interpreter')
+        ls = link_host(d, 'game-check.dylib', ['-DSNES_LOCKSTEP'], '-O1')
+        out = run([lockstep, '--frames', '3000', '--monkey', '7', '--rom', rom], {'SF2_GAMELIB': ls, 'SF2_MONKEY_RUN': '1'}).stdout
+        bad = len(re.findall(r'^block ', out, re.M))
+        m = re.search(r'blocks (\d+)', out[out.rfind('frames '):]) if 'frames ' in out else None
+        checked = int(m[1]) if m else 0
+        if not checked:
+            fail('The check didn\'t finish: ' + out[-300:])
+        os.remove(ls)
     say(event='verified', blocks=checked, mismatches=bad)
 
     native_lib = None
@@ -321,7 +390,6 @@ def main():
         if r.returncode:
             fail('Couldn\'t reach the iMac at %s.' % host)
 
-    os.remove(ls)
     shutil.rmtree(os.path.join(d, 'obj-game-check.dylib'), ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
     save(status='ready' if not bad else 'mismatch', instructions=st['instructions'], blocks=st['blocks'], addresses=len(read_cov(cov)),

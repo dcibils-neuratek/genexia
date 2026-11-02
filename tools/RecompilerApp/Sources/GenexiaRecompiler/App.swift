@@ -31,7 +31,9 @@ struct MainView: View {
             sidebar.frame(width: 280)
             Divider().opacity(0.3)
             ZStack {
-                if let g = store.games.first(where: { $0.id == store.selection }) {
+                if store.showHow {
+                    HowItWorks()
+                } else if let g = store.games.first(where: { $0.id == store.selection }) {
                     GameDetail(game: g)
                 } else {
                     DropHint(big: true)
@@ -69,7 +71,13 @@ struct MainView: View {
                 Text("Genexia").font(.system(size: 22, weight: .bold, design: .rounded))
                 Text("Recompiler").font(.subheadline).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 14)
+            .padding(.horizontal, 18).padding(.top, 38).padding(.bottom, 10)
+            Button { store.showHow = true } label: {
+                Label("How It Works", systemImage: "sparkles.rectangle.stack")
+                    .font(.system(size: 13, weight: .medium)).padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(store.showHow ? accent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 9))
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain).padding(.horizontal, 10).padding(.bottom, 8)
             ScrollView {
                 LazyVStack(spacing: 4) {
                     ForEach(store.games) { g in GameRow(game: g) }
@@ -90,7 +98,7 @@ struct DropHint: View {
             VStack(spacing: big ? 12 : 4) {
                 Image(systemName: "square.and.arrow.down").font(.system(size: big ? 44 : 16, weight: .light)).foregroundStyle(accent)
                 Text(big ? "Drop a ROM here" : "Drop or choose a ROM").font(big ? .title2.weight(.medium) : .caption)
-                if big { Text("SNES today. Genesis and Nintendo 64 are recognized and coming next.").font(.callout).foregroundStyle(.secondary) }
+                if big { Text("SNES and Nintendo 64 today. Genesis is recognized and coming next.").font(.callout).foregroundStyle(.secondary) }
             }
             .frame(maxWidth: big ? 420 : .infinity).padding(big ? 44 : 12)
             .background(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [6, 5])))
@@ -118,7 +126,7 @@ struct GameRow: View {
     @EnvironmentObject var store: Store
     let game: Game
     var body: some View {
-        Button { store.selection = game.id } label: {
+        Button { store.selection = game.id; store.showHow = false } label: {
             HStack(spacing: 10) {
                 Group {
                     if game.building { ProgressView().controlSize(.small) }
@@ -138,7 +146,7 @@ struct GameRow: View {
                 }
             }
             .padding(9)
-            .background(store.selection == game.id ? accent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 9))
+            .background(store.selection == game.id && !store.showHow ? accent.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 9))
             .contentShape(Rectangle())
         }.buttonStyle(.plain)
     }
@@ -168,11 +176,15 @@ struct GameDetail: View {
                     NativeBar(native: game.nativePercent, known: game.nativePercent > 0)
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                         Stat(value: game.instructions.formatted(), label: "instructions compiled")
-                        Stat(value: game.followed == 0 ? "–" : "\(game.followed * 100 / max(1, game.instructions))%", label: "seen running or followed")
-                        Stat(value: game.guessed == 0 ? "–" : "\(game.guessed * 100 / max(1, game.instructions))%", label: "guessed, not yet reached")
-                        Stat(value: game.checkedBlocks == 0 ? "–" : compact(game.checkedBlocks), label: game.mismatches == 0 ? "blocks verified" : "\(game.mismatches) mismatches")
+                        if game.isN64 {
+                            Stat(value: game.addresses.formatted(), label: "code addresses seen running")
+                        } else {
+                            Stat(value: game.followed == 0 ? "–" : "\(game.followed * 100 / max(1, game.instructions))%", label: "seen running or followed")
+                            Stat(value: game.guessed == 0 ? "–" : "\(game.guessed * 100 / max(1, game.instructions))%", label: "guessed, not yet reached")
+                        }
+                        Stat(value: game.checkedBlocks == 0 ? "–" : compact(game.checkedBlocks), label: game.mismatches != 0 ? "\(game.mismatches) mismatches" : game.isN64 ? "frames matched the interpreter" : "blocks verified")
                         Stat(value: size(game.libraryBytes), label: "Mac library")
-                        Stat(value: size(game.os9Bytes), label: "iMac library")
+                        if !game.isN64 { Stat(value: size(game.os9Bytes), label: "iMac library") }
                     }
                     OptionsCard(game: game)
                     if !game.log.isEmpty {
@@ -186,8 +198,10 @@ struct GameDetail: View {
             HStack {
                 Button { store.play(game) } label: { Label("Play", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent).tint(accent).disabled(game.building || game.problem != nil)
-                Button { store.sendToIMac(game) } label: { Label("Send to iMac", systemImage: "desktopcomputer") }
-                    .disabled(game.os9Library == nil || game.building)
+                if !game.isN64 {
+                    Button { store.sendToIMac(game) } label: { Label("Send to iMac", systemImage: "desktopcomputer") }
+                        .disabled(game.os9Library == nil || game.building)
+                }
                 Button { store.rebuild(game) } label: { Label("Grow again", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(game.building || game.queued)
                     .help("Keeps everything found so far, adds iMac recordings, sends the bots to play again, recompiles and re-verifies")
@@ -247,7 +261,7 @@ struct WaitingCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Check iMac") { store.checkIMac(game) }.disabled(game.building || game.queued)
+            if !game.isN64 { Button("Check iMac") { store.checkIMac(game) }.disabled(game.building || game.queued) }
             Button("Compile") { store.rebuild(game) }
                 .buttonStyle(.borderedProminent).tint(.orange).disabled(game.waiting == 0 || game.building || game.queued)
         }
@@ -279,10 +293,16 @@ struct OptionsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Options for this game").font(.headline)
-            Picker("Picture", selection: binding(\.picture)) {
-                Text("Original").tag(0); Text("4:3 TV").tag(1); Text("16:9").tag(2); Text("Ultrawide 21:9").tag(3)
-            }.pickerStyle(.segmented)
-            if !note.isEmpty { Text(note).font(.caption).foregroundStyle(.secondary) }
+            if game.isN64 {
+                Picker("Picture", selection: binding(\.picture)) {
+                    Text("Original 4:3").tag(0); Text("16:9").tag(2); Text("Ultrawide 21:9").tag(3)
+                }.pickerStyle(.segmented)
+            } else {
+                Picker("Picture", selection: binding(\.picture)) {
+                    Text("Original").tag(0); Text("4:3 TV").tag(1); Text("16:9").tag(2); Text("Ultrawide 21:9").tag(3)
+                }.pickerStyle(.segmented)
+                if !note.isEmpty { Text(note).font(.caption).foregroundStyle(.secondary) }
+            }
             Picker("Filter", selection: binding(\.filter)) {
                 Text("Sharp").tag(0); Text("Smooth").tag(1); Text("Scanlines").tag(2); Text("CRT").tag(3)
             }.pickerStyle(.segmented)
@@ -294,11 +314,13 @@ struct OptionsCard: View {
                 o.record = v ? 1 : 0
                 store.setOptions(game, o)
             }))
-            Toggle("Remove sprite flicker", isOn: Binding(get: { game.options.sprites != 0 }, set: { v in
-                var o = game.options
-                o.sprites = v ? 1 : 0
-                store.setOptions(game, o)
-            }))
+            if !game.isN64 {
+                Toggle("Remove sprite flicker", isOn: Binding(get: { game.options.sprites != 0 }, set: { v in
+                    var o = game.options
+                    o.sprites = v ? 1 : 0
+                    store.setOptions(game, o)
+                }))
+            }
             HStack {
                 Text("Speed")
                 Slider(value: Binding(get: { Double(game.options.speed) }, set: { v in
@@ -308,7 +330,7 @@ struct OptionsCard: View {
                 }), in: 50...200, step: 10)
                 Text("\(game.options.speed)%").monospacedDigit().frame(width: 44, alignment: .trailing)
             }
-            Text("Applies on this Mac. The iMac keeps its own settings.").font(.caption).foregroundStyle(.secondary)
+            if !game.isN64 { Text("Applies on this Mac. The iMac keeps its own settings.").font(.caption).foregroundStyle(.secondary) }
         }
         .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
@@ -329,9 +351,10 @@ struct Stat: View {
 
 struct StepStrip: View {
     let game: Game
+    var steps: [(id: String, title: String, icon: String)] { game.isN64 ? buildSteps.filter { $0.id != "os9" } : buildSteps }
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(Array(buildSteps.enumerated()), id: \.offset) { i, s in
+            ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
                 let finished = game.done.contains(s.id) || (game.status == "ready" && !game.building && !game.queued && game.problem == nil)
                 let active = game.step == s.id && game.building
                 VStack(spacing: 6) {
@@ -343,7 +366,7 @@ struct StepStrip: View {
                     Text(s.title).font(.caption2).foregroundStyle(active ? .primary : .secondary)
                 }
                 .frame(maxWidth: .infinity)
-                if i < buildSteps.count - 1 {
+                if i < steps.count - 1 {
                     Rectangle().fill(.white.opacity(finished ? 0.3 : 0.08)).frame(height: 1).offset(y: -9).frame(maxWidth: 26)
                 }
             }

@@ -311,6 +311,14 @@ int n64_force_interp;
 __attribute__((weak)) void recomp_register_sm64(void) {}   /* until recomps/n64/sm64 is generated */
 static FILE *cov_log;
 static u32 *rom_of;                /* SF2_MISSLOG: ROM offset of each RDRAM word */
+N64GameEntry n64_game_lib;
+char n64_record_path[512];         /* where the recorder writes, empty for none */
+static void log_dma(u32 d, u32 c, u32 n) {
+    static u32 said[4093];         /* games repeat the same copies all session */
+    u32 h = (d * 31 + c) * 31 + n, *s = &said[h % 4093];
+    if (*s != h + 1) { *s = h + 1; fprintf(cov_log, "D %06X %07X %X\n", d, c, n); fflush(cov_log); }
+    r4300_recomp_unseen(d, n);
+}
 
 static void pi_dma_to_rdram(u32 len) {
     u32 d = pi_reg[0] & 0xFFFFFF, c = pi_reg[1] & 0x0FFFFFFF;
@@ -323,7 +331,7 @@ static void pi_dma_to_rdram(u32 len) {
     pi_reg[1] = (pi_reg[1] + n);
     r4300_code_written(d, n);
     if (rom_of) {                  /* dev: remember where code comes from */
-        fprintf(cov_log, "D %06X %07X %X\n", d, c, n); fflush(cov_log);
+        log_dma(d, c, n);
         for (u32 i = 0; i + 4 <= n; i += 4) rom_of[((d + i) & (N64_RDRAM_SIZE - 1)) >> 2] = c + i;
     }
     st_pi_dma++; st_pi_bytes += n;
@@ -629,6 +637,16 @@ int n64_detect(void) {
     return m == 0x80371240 || m == 0x37804012 || m == 0x40123780;
 }
 
+u8 *n64_eeprom(u32 *size) { *size = sizeof eeprom; return eeprom; }
+
+/* Everything the game has done, to compare a recompiled run with the interpreter. */
+u64 n64_state_hash(void) {
+    u64 h = 0xCBF29CE484222325ull;
+    for (u32 i = 0; i < N64_RDRAM_SIZE; i += 8) { u64 v; memcpy(&v, n64_rdram + i, 8); h = (h ^ v) * 0x100000001B3ull; }
+    for (int i = 0; i < 32; i++) h = (h ^ r4300_gpr[i]) * 0x100000001B3ull;
+    return h;
+}
+
 const char *n64_load(void) {
     static char title[24];
     u32 m = R32(rom);
@@ -668,16 +686,24 @@ void n64_reset(void) {
     static int recomp_ready;
     if (!recomp_ready) {
         recomp_ready = 1;
-        if (n64_register_game && !n64_force_interp) { n64_register_game(); r4300_recomp_enable(); }
+        if (n64_game_lib && !n64_force_interp) {
+            r4300_recomp_enable();
+            static N64Env env;
+            env = (N64Env){ n64_rdram, r4300_gpr, &s_hi, &s_lo, r4300_cop0, s_fpw, &s_fcr31, &r4_pc, &r4_npc, &r4_exit,
+                            &s_limit, r4_active, r4300_cop1, r4300_recomp_add };
+            n64_game_lib(&env);
+        } else if (n64_register_game && !n64_force_interp) { n64_register_game(); r4300_recomp_enable(); }
         const char *p = getenv("SF2_MISSLOG");
+        if (!p && n64_record_path[0]) p = n64_record_path;
         if (p && !n64_force_interp) {
             cov_log = fopen(p, "a");
+            setvbuf(cov_log, NULL, _IOLBF, 0);    /* the Recompiler counts it during play */
             rom_of = calloc(N64_RDRAM_SIZE >> 2, sizeof *rom_of);
             r4300_recomp_log(cov_log, rom_of);
         }
     }
     if (rom_of) {
-        fprintf(cov_log, "D %06X %07X %X\n", entry & 0x7FFFFF, 0x1000, n);
+        log_dma(entry & 0x7FFFFF, 0x1000, n);
         for (u32 i = 0; i + 4 <= n; i += 4) rom_of[((entry & 0x7FFFFF) + i) >> 2] = 0x1000 + i;
     }
     r4300_reset(entry);

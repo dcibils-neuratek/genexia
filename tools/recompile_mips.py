@@ -11,6 +11,7 @@ Each block mirrors the interpreter in src/chips/r4300.c exactly, including its
 cycle costs; see src/chips/r4300_recomp.h for the contract. Whatever a block
 does not handle leaves it for the interpreter.
 """
+import json
 import os
 import struct
 import sys
@@ -422,11 +423,40 @@ class Recompiler:
             self.blocks[(pc, delta)] = self.block(pc, delta)
 
 
+def write_map(path, size, blocks, words):
+    """What was found, in ROM runs, for the Recompiler's ROM map."""
+    done, offsets, lengths, edges, ticker = set(), [], [], [], []
+    step_t = max(1, len(blocks) // 600)
+    for n, (pc, d, b) in enumerate(blocks):
+        start = (pc + d) & 0xFFFFFFFF
+        fresh = [start + 4 * i for i in range(len(b['words'])) if start + 4 * i not in done]
+        done.update(fresh)
+        if not fresh:
+            continue
+        i = len(offsets)
+        offsets.append(fresh[0])
+        lengths.append(4 * len(fresh))
+        w = b['words'][-2] if len(b['words']) > 1 else b['words'][-1]
+        target = pc + len(b['words']) * 4 - 4 + 4 + (((w & 0xFFFF) ^ 0x8000) - 0x8000) * 4
+        if branch_of(pc + (len(b['words']) - 2) * 4, w) and 0 <= target + d < size:
+            edges.append([i, fresh[0], target + d])
+        if n % step_t == 0:
+            ticker.append([i, '%08X' % pc, '%08X' % b['words'][0], b['lines'][0].strip()[:44] if b['lines'] else ''])
+    edges = edges[::max(1, len(edges) // 2500)]
+    with open(path, 'w') as f:
+        json.dump({'size': size, 'followed': len(offsets), 'offsets': offsets, 'lengths': lengths, 'edges': edges, 'ticker': ticker}, f, separators=(',', ':'))
+
+
 def main():
     a = sys.argv[1:]
     rom_path, out = a[0], a[1]
     opt = {a[i]: a[i + 1] for i in range(2, len(a), 2)}
-    rom = open(rom_path, 'rb').read()
+    rom = bytearray(open(rom_path, 'rb').read())
+    if rom[:4] == b'\x37\x80\x40\x12':        # .v64
+        rom[0::2], rom[1::2] = rom[1::2], rom[0::2]
+    elif rom[:4] == b'\x40\x12\x37\x80':      # .n64
+        rom[0::4], rom[1::4], rom[2::4], rom[3::4] = rom[3::4], rom[2::4], rom[1::4], rom[0::4]
+    rom = bytes(rom)
     regions, seeds = [], []
     for line in open(opt['--entries']):
         f = line.split()
@@ -472,8 +502,14 @@ def main():
             b = r.blocks[(pc, d)]
             f.write('    r4300_recomp_add(0x%08Xu, %s, %s_w, %d);\n' % (pc, name, name, len(b['words'])))
         f.write('}\n')
-    insts = sum(len(b['words']) for _, _, b in blocks)
-    print('%d blocks, %d instructions, %d self loops' % (len(blocks), insts, getattr(r, 'loops', 0)), file=sys.stderr)
+    # blocks overlap: count each ROM word once
+    words = {}
+    for pc, d, b in blocks:
+        for i, w in enumerate(b['words']):
+            words.setdefault((pc + d + 4 * i) & 0xFFFFFFFF, (pc + 4 * i, w))
+    if '--map' in opt:
+        write_map(opt['--map'], len(rom), blocks, words)
+    print('%d blocks, %d instructions, %d self loops' % (len(blocks), len(words), getattr(r, 'loops', 0)), file=sys.stderr)
 
 
 if __name__ == '__main__':

@@ -38,6 +38,41 @@ void r4300_recomp_flush(void);     /* RDRAM changed wholesale */
 void r4300_code_written(u32 pa, u32 n);
 void r4300_recomp_log(FILE *f, const u32 *rom_of);
 void r4300_recomp_print(void);
+void r4300_recomp_unseen(u32 pa, u32 n);
+extern long long r4300_native_cycles, r4300_interp_cycles;
+extern int r4300_recording;        /* log what the interpreter had to run */
+extern u32 r4300_recorded;
+
+/* A game can live in a library of its own, loaded at run time. Everything its code
+ * touches in the emulator comes through this table, handed over once on loading. */
+typedef struct {
+    u8 *rdram;
+    u64 *gpr, *hi, *lo;
+    u32 *cop0, *fpw, *fcr31, *pc, *npc, *exit;
+    int *limit;
+    R4Block *active;
+    int (*cop1)(u32);
+    void (*add)(u32, R4Block, const u32 *, u32);
+} N64Env;
+typedef void (*N64GameEntry)(const N64Env *);
+extern N64GameEntry n64_game_lib;
+#ifdef GAME_LIB
+extern N64Env genv;
+#define n64_rdram genv.rdram
+#define r4300_gpr genv.gpr
+#define s_hi (*genv.hi)
+#define s_lo (*genv.lo)
+#define r4300_cop0 genv.cop0
+#define s_fpw genv.fpw
+#define s_fcr31 (*genv.fcr31)
+#define r4_pc (*genv.pc)
+#define r4_npc (*genv.npc)
+#define r4_exit (*genv.exit)
+#define s_limit (*genv.limit)
+#define r4_active genv.active
+#define r4300_cop1 genv.cop1
+#define r4300_recomp_add genv.add
+#endif
 
 #define FC_CLEAR (s_fcr31 &= ~0x3F000u)
 

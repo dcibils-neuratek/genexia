@@ -30,6 +30,8 @@ struct Game: Identifiable, Equatable {
     var detail = ""
     var done: Set<String> = []
     var log: [String] = []
+
+    var isN64: Bool { console == "Nintendo 64" }
 }
 
 let buildSteps: [(id: String, title: String, icon: String)] = [
@@ -81,6 +83,7 @@ final class Store: ObservableObject {
     @Published var selection: String?
     @Published var banner: String?
     @Published var packaging: String?
+    @Published var showHow = false
     @AppStorage("imacHost") var imacHost = "192.168.1.38"
 
     private var queue: [String] = []
@@ -102,7 +105,7 @@ final class Store: ObservableObject {
 
     private func addresses(_ url: URL) -> Set<Substring> {
         guard let t = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return Set(t.split(separator: "\n").filter { $0.count == 8 })
+        return Set(t.split(separator: "\n").filter { $0.count == 8 || $0.hasPrefix("B ") })
     }
 
     /// Genexia adds to recorded.txt during play, so this keeps up while a game runs.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds "Genexia Recompiler.app" next to this script's repo root.
-set -e
+set -eo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd ../.. && pwd)"
 swift build -c release 2>&1 | tail -3
