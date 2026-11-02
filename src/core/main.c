@@ -513,7 +513,9 @@ static void configure_game(int region_set) {
         snprintf(game_title, sizeof game_title, "%s", snes_load());
         /* recompiled code for this exact ROM, if we have it */
         snes_register_game = !strcmp(game_title, "SUPER MARIO KART") && rom[0xFFDE] == 0x44 && rom[0xFFDF] == 0xEB
-                             ? recomp_register_smk : NULL;
+                             ? recomp_register_smk
+                             : !strcmp(game_title, "DONKEY KONG COUNTRY") && rom[0xFFDE] == 0xCC && rom[0xFFDF] == 0x2B
+                             ? recomp_register_dkc : NULL;
         snes_force_interp = m68k_force_interp || !snes_register_game;
         if (!probing) fprintf(stderr, "Game: %s  (SNES, %s)\n", game_title, snes_force_interp ? "interpreter" : "recompiled");
         return;

@@ -39,7 +39,7 @@ else
 OBJS     += $(BUILD)/core/rom_none.o
 endif
 
-.PHONY: FORCE os9 os9-n64bench os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-sm64 coverage app tests clean
+.PHONY: FORCE os9 os9-n64bench os9-push os9-log all recompile recompile-umk3 recompile-smk recompile-dkc recompile-sm64 coverage app tests clean
 
 all: genexia
 
@@ -93,6 +93,10 @@ recompile-umk3:
 SMK_ROM ?= roms/snes/Super Mario Kart (USA).sfc
 recompile-smk:
 	python3 tools/recompile_65816.py "$(SMK_ROM)" recomps/snes/smk --entries recomps/snes/smk/coverage.txt --listing docs/smk.lst --prefix S_ --register recomp_register_smk
+
+DKC_ROM ?= roms/snes/Donkey Kong Country (U) (V1.2) [!].smc
+recompile-dkc:
+	python3 tools/recompile_65816.py "$(DKC_ROM)" recomps/snes/dkc --entries recomps/snes/dkc/coverage.txt --listing docs/dkc.lst --prefix D_ --register recomp_register_dkc
 
 # dev: each recompiled block checked against the interpreter, see machine.c
 LS_SRC := src/backends/snes/machine.c $(wildcard recomps/snes/smk/recomp_*.c)

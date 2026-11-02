@@ -957,7 +957,7 @@ static int rom_code(const u8 *r) {
     if (hdr == 0xFC4C && !memcmp(r + 0x180, "GM T-097146", 11)) return 2;
     return 0;
 }
-enum { CODE_SMK = 3, CODE_SNES = 4, CODE_SM64 = 5 };      /* the other values: rom_code() */
+enum { CODE_SMK = 3, CODE_SNES = 4, CODE_SM64 = 5, CODE_DKC = 6 };      /* the other values: rom_code() */
 
 /* the whole file into rom[], because a SNES header can be in several places */
 static int rom_read(const FSSpec *spec) {
@@ -973,7 +973,8 @@ static int rom_read(const FSSpec *spec) {
 static void snes_name(Game *g) {
     const char *title = snes_load();
     g->code = !strcmp(title, "SUPER MARIO KART") && rom[0xFFDE] == 0x44 && rom[0xFFDF] == 0xEB ? CODE_SMK : CODE_SNES;
-    snprintf(g->name, sizeof g->name, "%s", g->code == CODE_SMK ? "Super Mario Kart" : title);
+    if (!strcmp(title, "DONKEY KONG COUNTRY") && rom[0xFFDE] == 0xCC && rom[0xFFDF] == 0x2B) g->code = CODE_DKC;
+    snprintf(g->name, sizeof g->name, "%s", g->code == CODE_SMK ? "Super Mario Kart" : g->code == CODE_DKC ? "Donkey Kong Country" : title);
 }
 
 static void game_probe(const FSSpec *spec) {
@@ -1119,7 +1120,7 @@ static int game_load(const Game *g) {
     if (g->code >= CODE_SMK) {
         Game again = *g;
         snes_name(&again);
-        snes_register_game = g->code == CODE_SMK ? recomp_register_smk : NULL;
+        snes_register_game = g->code == CODE_SMK ? recomp_register_smk : g->code == CODE_DKC ? recomp_register_dkc : NULL;
         snes_force_interp = !snes_register_game;
         snes_game = 1;
         snd_rate = SNES_DSP_RATE;

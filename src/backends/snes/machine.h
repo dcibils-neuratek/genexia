@@ -22,6 +22,7 @@ extern void (*snes_register_game)(void);   /* recompiled code of the loaded game
 typedef struct { unsigned pc; int mx; void (*f)(void); } SnesBlock;
 void snes_recomp_add(const SnesBlock *b, unsigned n);
 void recomp_register_smk(void);
+void recomp_register_dkc(void);
 #ifdef GENEXIA_OS9
 extern u32 snes_t_ppu, snes_t_apu;   /* time spent there, for the log */
 #endif
