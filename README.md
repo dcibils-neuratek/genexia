@@ -5,6 +5,11 @@ code into native Mac code and runs it on reimplemented console hardware, with on
 shared front end for every console: video filters, options menu, controls, speed,
 run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES and Nintendo 64.
 
+> **Genexia does not provide ROMs.** You should own the real game and supply the ROM
+> yourself. The idea behind this project is to enjoy our games with new generations and
+> run them on other devices, for fun, as an experiment and for personal enjoyment. A
+> packaged app contains your ROM, so keep it for yourself.
+
 | Game | Status |
 |---|---|
 | Street Fighter II' Special Champion Edition | Recompiled and built in; widescreen, killer combos, mana |

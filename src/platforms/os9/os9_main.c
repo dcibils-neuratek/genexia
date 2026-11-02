@@ -1074,6 +1074,13 @@ static void select_draw(u32 *fb, int sel, int top) {
 /* Returns the chosen game, or NULL to quit. */
 static const Game *game_select(void) {
     static u32 fb[VDP_FB_STRIDE * 240];
+    {   /* a packaged game: go straight in, and don't record into its disk */
+        FSSpec spec;
+        if (FSMakeFSSpec(0, 0, "\pgame.rom", &spec) == noErr) {
+            game_probe(&spec);
+            if (ngames) { snes_recording = 0; return &games[0]; }
+        }
+    }
     WDPBRec here;
     memset(&here, 0, sizeof here);
     if (PBHGetVolSync(&here) == noErr) game_scan(here.ioWDVRefNum, here.ioWDDirID, 1);

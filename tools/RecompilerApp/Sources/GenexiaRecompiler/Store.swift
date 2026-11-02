@@ -30,6 +30,10 @@ struct Game: Identifiable, Equatable {
     var detail = ""
     var done: Set<String> = []
     var log: [String] = []
+    var progressLabel = ""
+    var progressDone = 0
+    var progressTotal = 0
+    var progressStart = Date()
 
     var isN64: Bool { console == "Nintendo 64" }
 }
@@ -43,6 +47,56 @@ let buildSteps: [(id: String, title: String, icon: String)] = [
     ("verify", "Verify", "checkmark.seal"),
     ("os9", "iMac library", "desktopcomputer"),
 ]
+
+enum InfoPage { case how, systems }
+
+enum GameTab { case compile, play }
+
+/// A file holding someone's progress in a game.
+struct GameSave: Identifiable {
+    let url: URL
+    let title: String
+    let detail: String
+    let icon: String
+    let date: Date
+    var id: URL { url }
+}
+
+/// A packaging run, for the window that shows it.
+struct PackageJob: Identifiable {
+    let id = UUID()
+    let title: String
+    let target: PackageTarget
+    var step = ""
+    var done = 0
+    var total = 0
+    var bytes = 0
+    var finished = false
+    var result: URL?
+    var problem: String?
+}
+
+/// The machines a game can be packaged for.
+enum PackageTarget: String, CaseIterable, Identifiable {
+    case arm, intel, ppc
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .arm: return "Mac Apple Silicon"
+        case .intel: return "Mac Intel"
+        case .ppc: return "Mac PowerPC: Mac OS 9 disk for G3, G4 (G5 in Classic)"
+        }
+    }
+    func available(_ g: Game) -> Bool { self != .ppc || g.os9Library != nil }
+    var steps: [(id: String, title: String, icon: String)] {
+        switch self {
+        case .arm: return [("runtime", "Build the emulators", "cpu"), ("icon", "Make the icon", "photo"), ("assemble", "Put the app together", "shippingbox")]
+        case .intel: return [("runtime", "Build the Intel emulators", "cpu"), ("compile", "Compile the game for Intel", "hammer"), ("link", "Link its library", "link"),
+                             ("icon", "Make the icon", "photo"), ("assemble", "Put the app together", "shippingbox")]
+        case .ppc: return [("runtime", "Build the Mac OS 9 emulators", "cpu"), ("disk", "Write the disk", "opticaldisc")]
+        }
+    }
+}
 
 /// What Genexia applies when this game starts, kept in options.txt beside its library.
 struct GameOptions: Equatable {
@@ -82,8 +136,9 @@ final class Store: ObservableObject {
     @Published var games: [Game] = []
     @Published var selection: String?
     @Published var banner: String?
-    @Published var packaging: String?
-    @Published var showHow = false
+    @Published var packaging: PackageJob?
+    @Published var info: InfoPage?
+    @Published var tab = GameTab.compile
     @AppStorage("imacHost") var imacHost = "192.168.1.38"
 
     private var queue: [String] = []
@@ -217,6 +272,16 @@ final class Store: ObservableObject {
                 g.detail = e["detail"] as? String ?? ""
                 g.log.append(g.detail)
             }
+        case "progress":
+            update(live) { g in
+                let label = e["label"] as? String ?? ""
+                if label != g.progressLabel || (e["done"] as? Int ?? 0) == 0 { g.progressStart = Date() }
+                g.progressLabel = label
+                g.progressDone = e["done"] as? Int ?? 0
+                g.progressTotal = e["total"] as? Int ?? 0
+            }
+        case "timing":
+            update(live) { g in g.log.append("\(e["detail"] ?? ""): \(e["seconds"] ?? 0) s") }
         case "inspected":
             let realID = e["id"] as? String ?? live
             update(live) { g in
@@ -283,26 +348,38 @@ final class Store: ObservableObject {
         NSWorkspace.shared.open(gamesDir.appendingPathComponent(game.id))
     }
 
-    /// Makes a double-clickable app of the game: emulators, ROM and native code together.
-    func package(_ game: Game) {
-        banner = "Packaging \(game.title)…"
-        packaging = game.id
-        var app: String?
-        var problem: String?
-        run(["python3", repo + "/tools/package_game.py", game.id], onLine: { [weak self] line in
+    /// Makes a game that runs on its own: emulators, ROM and native code together.
+    func package(_ game: Game, for target: PackageTarget) {
+        packaging = PackageJob(title: game.title.capitalized, target: target)
+        run(["python3", repo + "/tools/package_game.py", game.id, "--target", target.rawValue], onLine: { [weak self] line in
             guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
-            if let s = e["step"] as? String { self?.banner = s + "…" }
-            if let a = e["app"] as? String { app = a }
-            if let m = e["message"] as? String { problem = m }
-        }) { [weak self] code in
-            self?.packaging = nil
-            if code == 0, let app {
-                let url = URL(fileURLWithPath: app)
-                self?.banner = "\(url.deletingPathExtension().lastPathComponent) is ready in Applications › Genexia Games."
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-            } else {
-                self?.banner = problem ?? "Packaging \(game.title) failed."
+            if let id = e["id"] as? String {
+                self?.packaging?.step = id
+                self?.packaging?.done = e["done"] as? Int ?? 0
+                self?.packaging?.total = e["total"] as? Int ?? 0
             }
+            if let a = e["app"] as? String { self?.packaging?.result = URL(fileURLWithPath: a) }
+            if let b = e["bytes"] as? Int { self?.packaging?.bytes = b }
+            if let m = e["message"] as? String { self?.packaging?.problem = m }
+        }) { [weak self] code in
+            guard let self, self.packaging != nil else { return }
+            self.packaging?.finished = true
+            if code != 0 || self.packaging?.result == nil, self.packaging?.problem == nil {
+                self.packaging?.problem = "Packaging stopped before it finished."
+            }
+        }
+    }
+
+    func saves(for game: Game) -> [GameSave] {
+        let packaged = gamesDir.deletingLastPathComponent().appendingPathComponent(game.id)
+        let places: [(URL, String, String, String)] = [
+            (URL(fileURLWithPath: game.romPath + ".state"), "Save state", "From Genexia", "bookmark.fill"),
+            (packaged.appendingPathComponent("game.state"), "Save state", "From the packaged app", "bookmark.fill"),
+            (packaged.appendingPathComponent("battery.srm"), "Cartridge save", "From the packaged app", "memorychip"),
+        ]
+        return places.compactMap { url, title, detail, icon in
+            guard let d = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
+            return GameSave(url: url, title: title, detail: detail, icon: icon, date: d)
         }
     }
 

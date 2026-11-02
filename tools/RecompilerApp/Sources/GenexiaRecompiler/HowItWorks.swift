@@ -64,6 +64,7 @@ struct HowItWorks: View {
                 GrowLoop()
                 InsideTheApp()
                 Compare()
+                YourGames()
             }
             .padding(.horizontal, 28).padding(.top, 34).padding(.bottom, 24)
         }
@@ -353,6 +354,24 @@ struct InsideTheApp: View {
         }
         .padding(11).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(c.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Whose games these are, and what this is for.
+struct YourGames: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "heart.text.square").font(.system(size: 22)).foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Your games, your ROMs").font(.headline)
+                Text("Genexia doesn't provide ROMs. You should own the real game and supply the ROM yourself.")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                Text("The idea is to keep our games alive for new generations and run them on other devices, for fun, as an experiment and for personal enjoyment. A packaged app contains your ROM, so keep it for yourself.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

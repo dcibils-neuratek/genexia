@@ -60,7 +60,8 @@ genexia: $(OBJS)
 
 # The emulators with no game inside, for packaged games: tools/package_game.py
 RT_OBJS := $(filter-out $(BUILD)/gen/% $(BUILD)/core/rom_embed.o $(BUILD)/rom_embed_data.o,$(OBJS))
-genexia-runtime: $(sort $(RT_OBJS) $(BUILD)/core/rom_none.o $(BUILD)/core/no_games.o)
+RT_OUT  ?= genexia-runtime
+$(RT_OUT): $(sort $(RT_OBJS) $(BUILD)/core/rom_none.o $(BUILD)/core/no_games.o)
 	$(CC) -o $@ $^ $(SDL_LD) -lm
 
 HDRS     := $(wildcard src/*.h src/*/*.h src/backends/*/*.h)
@@ -180,6 +181,12 @@ os9: $(BUILD)/version.h
 IMAC ?= 192.168.1.38
 os9-push: os9
 	python3 tools/os9_share.py $(IMAC) push $(BUILD)/os9/Genexia.bin "Genexia $(BUILD_NO)"
+# The OS 9 app with no game inside, for packaged games
+os9-runtime: $(BUILD)/version.h
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake -S src/platforms/os9 -B $(BUILD)/os9/runtime -DNO_GAMES=ON \
+	  -DCMAKE_TOOLCHAIN_FILE=$(RETRO68)/toolchain/powerpc-apple-macos/cmake/retroppc.toolchain.cmake
+	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake --build $(BUILD)/os9/runtime -- -j8
+
 # Times Mario 64's game code on the iMac; needs recompile-sm64c first.
 os9-n64bench: $(BUILD)/version.h
 	PATH="$(RETRO68)/toolchain/bin:$$PATH" cmake -S tools/os9_n64bench -B $(BUILD)/os9/n64bench \

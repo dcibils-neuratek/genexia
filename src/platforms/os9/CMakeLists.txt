@@ -6,6 +6,11 @@ project(GenexiaOS9 C)
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 file(GLOB RECOMP ${ROOT}/recomps/genesis/sf2/recomp_*.c ${ROOT}/recomps/genesis/umk3/recomp_*.c ${ROOT}/recomps/snes/smk/recomp_*.c ${ROOT}/recomps/snes/dkc/recomp_*.c)
 file(GLOB RECOMP_N64 ${ROOT}/recomps/n64/sm64c/recomp_*.c)
+# the emulators alone, for packaged games: tools/package_game.py
+if(NO_GAMES)
+    set(RECOMP ${ROOT}/src/core/no_games.c)
+    set(RECOMP_N64)
+endif()
 set(N64_SRC ${ROOT}/src/chips/r4300.c ${ROOT}/src/chips/f3d.c ${ROOT}/src/chips/aspmain.c ${ROOT}/src/backends/n64/machine.c ${RECOMP_N64})
 
 add_application(Genexia

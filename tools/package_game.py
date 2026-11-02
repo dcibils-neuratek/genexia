@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Package a built game as a double-clickable Mac app.
 
-    tools/package_game.py GAME_ID [--out DIR]
+    tools/package_game.py GAME_ID [--target arm|intel|ppc] [--out DIR]
 
 The app holds the emulators with no game built in, the game's ROM, its native
 library, its options and SDL, so it runs with neither Genexia nor this project
 around. It contains the ROM: it is for your own use, and it lands outside the
-repository so it can't be committed. Prints one line of JSON per event, like
+repository so it can't be committed.
+
+arm and intel make a Mac app. ppc makes an HFS disk image for Mac OS 9 holding
+the app, library and ROM side by side. Prints one line of JSON per event, like
 genexia_recompile.py.
 """
+import concurrent.futures as cf
 import json
 import os
 import plistlib
@@ -24,6 +28,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GAMES = os.path.expanduser('~/Library/Application Support/Genexia/games')
 OUT = os.path.expanduser('~/Applications/Genexia Games')
 RUNTIME = os.path.join(REPO, 'genexia-runtime')
+RUNTIME_X86 = os.path.join(REPO, 'genexia-runtime-x86_64')
+RETRO68 = os.path.expanduser('~/retro68-work/Retro68-build/toolchain')
+INCS = ['-I' + os.path.join(REPO, d) for d in ('build', 'src', 'src/core', 'src/chips', 'src/backends/genesis',
+                                              'src/backends/snes', 'src/backends/n64')]
+X86 = ['-arch', 'x86_64', '-mmacosx-version-min=10.15']
+# Homebrew's SDL has no Intel half. Any universal SDL2 does: it's the same library.
+SDL_X86 = ['/Applications/love.app/Contents/Frameworks/SDL2.framework/SDL2']
+SDL_LOCAL = os.path.join(REPO, 'build/x86_64/libSDL2-2.0.0.dylib')
 
 
 def say(**e):
@@ -121,9 +133,79 @@ def make_icon(shot, target, d):
     must(['iconutil', '-c', 'icns', '-o', target, iconset])
 
 
-def bundle_sdl(app):
+def intel_sdl():
+    if os.path.exists(SDL_LOCAL):
+        return SDL_LOCAL
+    src = next((p for p in SDL_X86 if os.path.exists(p)), None)
+    if not src:
+        fail('Intel apps need a universal SDL2, and none was found on this Mac.')
+    os.makedirs(os.path.dirname(SDL_LOCAL), exist_ok=True)
+    must(['lipo', '-thin', 'x86_64', src, '-output', SDL_LOCAL])
+    must(['install_name_tool', '-id', '@executable_path/../Frameworks/libSDL2-2.0.0.dylib', SDL_LOCAL])
+    return SDL_LOCAL
+
+
+def intel_runtime():
+    sdl = intel_sdl()
+    must(['make', '-j8', 'BUILD=build/x86_64', 'RT_OUT=genexia-runtime-x86_64', 'CC=clang ' + ' '.join(X86),
+          'SDL_LD=' + sdl + ' -Wl,-framework,Cocoa', 'genexia-runtime-x86_64'])
+
+
+def intel_library(d, console):
+    """The game's generated C, compiled again for an Intel CPU."""
+    gamelib = os.path.join(REPO, 'src/backends', 'n64' if console == 'Nintendo 64' else 'snes', 'gamelib.c')
+    code = os.path.join(d, 'code')
+    srcs = [gamelib] + sorted(os.path.join(code, f) for f in os.listdir(code) if f.endswith('.c'))
+    objdir = os.path.join(d, 'obj-intel')
+    os.makedirs(objdir, exist_ok=True)
+    flags = X86 + ['-O2', '-std=gnu11', '-w', '-fPIC', '-DGAME_LIB', '-DGAME_REGISTER=recomp_register_game'] + INCS
+    done = [0]
+
+    def one(s):
+        o = os.path.join(objdir, os.path.basename(s)[:-2] + '.o')
+        if not (os.path.exists(o) and os.path.getmtime(o) >= os.path.getmtime(s)):
+            extra = ['-O0'] if s.endswith('recomp_register.c') else []
+            must(['clang'] + flags + extra + ['-c', s, '-o', o])
+        done[0] += 1
+        say(event='packaging', id='compile', done=done[0], total=len(srcs))
+        return o
+    with cf.ThreadPoolExecutor(os.cpu_count() or 4) as ex:
+        objs = list(ex.map(one, srcs))
+    say(event='packaging', id='link')
+    lib = os.path.join(objdir, 'game.dylib')
+    must(['clang'] + X86 + ['-dynamiclib', '-Wl,-exported_symbol,_genexia_game', '-o', lib] + objs)
+    return lib
+
+
+def package_ppc(info, game, name, out):
+    """A disk for Mac OS 9: the app starts the game.rom beside it."""
+    if not info.get('os9_library') or not os.path.exists(info['os9_library']):
+        fail('This game has no PowerPC library yet. Only SNES games can be built for Mac OS 9 so far.')
+    say(event='packaging', id='runtime')
+    must(['make', 'os9-runtime'])
+    app = os.path.join(REPO, 'build/os9/runtime/Genexia.bin')
+    sizes = sum(os.path.getsize(p) for p in (app, info['os9_library'], info['rom']))
+    say(event='packaging', id='disk')
+    os.makedirs(out, exist_ok=True)
+    disk = os.path.join(out, name + ' (PowerPC).dsk')
+    with open(disk, 'wb') as f:
+        f.truncate((sizes * 11 // 10 + (4 << 20)) // 512 * 512)
+    env = dict(os.environ, PATH=os.path.join(RETRO68, 'bin') + ':' + os.environ['PATH'])
+    hfs_name = re.sub(r'[:]', ' ', name)[:27]
+    for cmd in (['hformat', '-l', hfs_name, disk], ['hcopy', '-m', app, ':' + hfs_name],
+                ['hcopy', '-m', info['os9_library'], ':%s.lib' % game], ['hcopy', '-r', info['rom'], ':game.rom'], ['humount']):
+        r = run(cmd, env)
+        if r.returncode:
+            fail(cmd[0] + ' failed: ' + r.stdout[-300:])
+    say(event='packaged', app=disk, name=name, bytes=os.path.getsize(disk))
+
+
+def bundle_sdl(app, intel=False):
     frameworks = os.path.join(app, 'Contents/Frameworks')
     os.makedirs(frameworks)
+    if intel:
+        shutil.copy(SDL_LOCAL, frameworks)
+        return
     exe = os.path.join(app, 'Contents/MacOS/genexia')
     prefix = must(['sdl2-config', '--prefix']).strip()
     sdl2 = next(l.split()[0] for l in must(['otool', '-L', exe]).splitlines() if 'libSDL2' in l)
@@ -142,9 +224,15 @@ def main():
     a = sys.argv[1:]
     if not a:
         sys.exit(__doc__)
-    game, out = a[0], OUT
-    if a[1:3] and a[1] == '--out':
-        out = a[2]
+    game, out, target = a[0], OUT, 'arm'
+    for k, v in zip(a[1::2], a[2::2]):
+        if k == '--out':
+            out = v
+        elif k == '--target' and v in ('arm', 'intel', 'ppc'):
+            target = v
+        else:
+            sys.exit('bad option ' + k)
+    intel = target == 'intel'
     d = os.path.join(GAMES, game)
     try:
         with open(os.path.join(d, 'info.json')) as f:
@@ -157,15 +245,23 @@ def main():
     if not os.path.exists(info['rom']):
         fail('The ROM has moved: ' + info['rom'])
 
-    say(event='packaging', step='Building the emulators')
-    must(['make', '-j8', 'genexia-runtime'])
-
     name = app_name(info)
-    app = os.path.join(out, name + '.app')
+    if target == 'ppc':
+        return package_ppc(info, game, name, out)
+    say(event='packaging', id='runtime')
+    must(['make', '-j8', 'genexia-runtime'])
+    if intel:
+        intel_runtime()
+        lib_for_app = intel_library(d, info['console'])
+    else:
+        lib_for_app = lib
+
+    title = name + (' (Intel)' if intel else '')
+    app = os.path.join(out, title + '.app')
     work = tempfile.mkdtemp(prefix='genexia-package')
     try:
-        say(event='packaging', step='Making the icon')
-        new = os.path.join(work, name + '.app')
+        say(event='packaging', id='icon')
+        new = os.path.join(work, title + '.app')
         res = os.path.join(new, 'Contents/Resources')
         os.makedirs(res)
         os.makedirs(os.path.join(new, 'Contents/MacOS'))
@@ -173,26 +269,26 @@ def main():
         if shot:
             make_icon(shot, os.path.join(res, 'game.icns'), work)
 
-        say(event='packaging', step='Putting the game together')
-        shutil.copy(RUNTIME, os.path.join(new, 'Contents/MacOS/genexia'))
+        say(event='packaging', id='assemble')
+        shutil.copy(RUNTIME_X86 if intel else RUNTIME, os.path.join(new, 'Contents/MacOS/genexia'))
         shutil.copy(info['rom'], os.path.join(res, 'game.rom'))
-        shutil.copy(lib, os.path.join(res, 'game.dylib'))
+        shutil.copy(lib_for_app, os.path.join(res, 'game.dylib'))
         options = os.path.join(d, 'options.txt')
         if os.path.exists(options):
             shutil.copy(options, os.path.join(res, 'options.txt'))
         else:
             open(os.path.join(res, 'options.txt'), 'w').close()
-        bundle_sdl(new)
+        bundle_sdl(new, intel)
         with open(os.path.join(new, 'Contents/Info.plist'), 'wb') as f:
             plist = {
                 'CFBundleExecutable': 'genexia',
-                'CFBundleIdentifier': 'local.genexia.game.' + game,
+                'CFBundleIdentifier': 'local.genexia.game.' + game + ('.intel' if intel else ''),
                 'CFBundleName': name,
                 'CFBundleDisplayName': name,
                 'CFBundlePackageType': 'APPL',
                 'CFBundleShortVersionString': '1.0',
                 'CFBundleVersion': str(info.get('built', 1)),
-                'LSMinimumSystemVersion': '11.0',
+                'LSMinimumSystemVersion': '10.15' if intel else '11.0',
                 'NSHighResolutionCapable': True,
             }
             if shot:

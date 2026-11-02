@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,8 +40,28 @@ def say(**e):
     print(json.dumps(e), flush=True)
 
 
+LAST_STEP = [None, time.time()]
+
+
 def step(name, detail=''):
+    now = time.time()
+    if LAST_STEP[0]:
+        say(event='timing', detail=LAST_STEP[0], seconds=round(now - LAST_STEP[1]))
+    LAST_STEP[:] = [detail or name, now]
     say(event='step', step=name, detail=detail)
+
+
+class Progress:
+    """Tells the app how far along a long stage is, from any thread."""
+
+    def __init__(self, label, total):
+        self.label, self.total, self.n, self.lock = label, total, 0, threading.Lock()
+        say(event='progress', label=label, done=0, total=total)
+
+    def tick(self):
+        with self.lock:
+            self.n += 1
+            say(event='progress', label=self.label, done=self.n, total=self.total)
 
 
 def fail(msg):
@@ -139,6 +160,7 @@ def read_fpu_mode(tool, rom):
 
 
 def recompile_n64(rom, d):
+    say(event='progress', label='Translating code to C', done=0, total=0)
     r = run([sys.executable, os.path.join(REPO, 'tools/recompile_mips.py'), rom, os.path.join(d, 'code'), '--entries', os.path.join(d, 'coverage.txt'),
              '--prefix', 'G_', '--register', REGISTER, '--map', os.path.join(d, 'map.json'), '--fr', str(fpu_mode)])
     m = re.search(r'(\d+) blocks, (\d+) instructions', r.stdout)
@@ -181,14 +203,21 @@ def compile_all(cc, flags, objdir, srcs):
         if r and r.returncode:
             fail('Compiling failed: ' + r.stdout[-400:])
         return o
+    bar = Progress('Compiling', len(srcs))
+
+    def counted(s):
+        o = one(s)
+        bar.tick()
+        return o
     with cf.ThreadPoolExecutor(os.cpu_count() or 4) as ex:
-        return list(ex.map(one, srcs))
+        return list(ex.map(counted, srcs))
 
 
 def link_host(d, name='game.dylib', extra=(), opt='-O2'):
     objs = compile_all('clang', [opt, '-std=gnu11', '-w', '-fPIC', '-DGAME_LIB', '-DGAME_REGISTER=' + REGISTER] + list(extra) + INCS,
                        os.path.join(d, 'obj-' + name), sources(d))
     out = os.path.join(d, name)
+    say(event='progress', label='Linking', done=0, total=0)
     r = run(['clang', '-dynamiclib', '-Wl,-exported_symbol,_genexia_game', '-o', out] + objs)
     if r.returncode:
         fail('Linking failed: ' + r.stdout[-400:])
@@ -254,7 +283,9 @@ def verify_n64(tool, rom, lib, bots):
             if not m:
                 fail('The check didn\'t finish: ' + out[-300:])
             hashes.append(m[1])
+        bar.tick()
         return hashes[0] != hashes[1]
+    bar = Progress('Runs compared', min(bots, 6))
     with cf.ThreadPoolExecutor(bots) as ex:
         results = list(ex.map(race, range(min(bots, 6))))
     return frames * len(results), sum(results)
@@ -342,7 +373,13 @@ def main():
         seeds = [(1000 * (r + 1) + b, b % 3) for b in range(bots)]
         miss = lambda s: os.path.join(tmp, 'r%d.miss' % s)
         with cf.ThreadPoolExecutor(bots) as ex:
-            outputs = list(ex.map(lambda p: play(tool, rom, frames, p[0], miss(p[0]), lib=lib, runner=p[1]), seeds))
+            bar = Progress('Bots finished', len(seeds))
+
+            def bot(p):
+                out = play(tool, rom, frames, p[0], miss(p[0]), lib=lib, runner=p[1])
+                bar.tick()
+                return out
+            outputs = list(ex.map(bot, seeds))
         known = read_cov(cov)
         new = set()
         for s, _ in seeds:
@@ -360,7 +397,13 @@ def main():
 
     step('measure', 'Measuring the finished library')
     with cf.ThreadPoolExecutor(bots) as ex:
-        outputs = list(ex.map(lambda b: play(tool, rom, frames, 9000 + b, None, lib=lib, runner=b % 3), range(bots)))
+        bar = Progress('Bots finished', bots)
+
+        def measure(b):
+            out = play(tool, rom, frames, 9000 + b, None, lib=lib, runner=b % 3)
+            bar.tick()
+            return out
+        outputs = list(ex.map(measure, range(bots)))
     native, mode7 = share(outputs)
     say(event='measured', native_percent=native, mode7_percent=mode7)
 
