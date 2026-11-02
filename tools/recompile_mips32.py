@@ -266,6 +266,7 @@ class Recompiler:
         self.starts = set()
         self.reached = {}       # (pc, delta) -> falls through to the next instruction
         self.blocks = {}
+        self.cut = set()        # where a block stopped only because it was full
 
     def region(self, pc, delta):
         return any(ram <= pc < ram + n and off - ram == delta for ram, off, n in self.regions)
@@ -338,6 +339,8 @@ class Recompiler:
         words, k, pc, end = [], 0, entry, None
         while True:
             if len(words) >= MAX_INSTS or ((pc, d) in self.starts and pc != entry) or not self.valid(pc, d):
+                if len(words) >= MAX_INSTS:
+                    self.cut.add((pc, d))
                 b.emit(b.flush_text())
                 end = 'GO(%s, 0x%08Xu, %d);' % (name_of(pc, d), pc, k)
                 break
@@ -422,6 +425,14 @@ def main():
     # return address; interrupts only happen between blocks now.
     r.starts = hard | {(pc, d) for pc, d in seeds if not r.reached.get((pc - 4, d))}
     r.starts = {s for s in r.starts if r.valid(*s)}
+    # A long run gets cut up, and the next piece must be a block of its own or
+    # the interpreter runs the rest of it.
+    todo = r.starts
+    while todo:
+        for pc, d in todo:
+            r.block(pc, d, lambda pc, d: 'NULL')
+        todo = {s for s in r.cut - r.starts if r.valid(*s)}
+        r.starts |= todo
 
     order = sorted(r.starts, key=lambda s: (s[0], s[1] & 0xFFFFFFFF))
     prefix = opt.get('--prefix', 'N_')
