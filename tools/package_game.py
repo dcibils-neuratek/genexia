@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Package a built game as a double-clickable Mac app.
 
-    tools/package_game.py GAME_ID [--target arm|intel|ppc] [--out DIR]
+    tools/package_game.py GAME_ID [--target arm|intel|ppc|windows|linux] [--out DIR]
 
 The app holds the emulators with no game built in, the game's ROM, its native
 library, its options and SDL, so it runs with neither Genexia nor this project
 around. It contains the ROM: it is for your own use, and it lands outside the
 repository so it can't be committed.
 
-arm and intel make a Mac app; a PSP game packages for arm only, with its disc
-and the Homebrew libraries its player uses inside. ppc makes an HFS disk image for Mac OS 9 holding
+arm and intel make a Mac app; a PSP game packages for arm, with its disc
+and the Homebrew libraries its player uses inside, or as a folder for x86-64
+windows or linux, built with zig and drawn with OpenGL. ppc makes an HFS disk image for Mac OS 9 holding
 the app, library and ROM side by side. Prints one line of JSON per event, like
 genexia_recompile.py.
 """
@@ -313,10 +314,8 @@ mkdir -p "$HOME/Library/Application Support/Genexia Games/%s" && cd "$HOME/Libra
 '''
 
 
-def package_psp_mac(info, game, name, out, d):
-    """A Mac app holding the PSP player, the game's program and its disc."""
-    if not os.path.exists(os.path.join(d, 'play_metal')):
-        fail('This game has not been compiled yet.')
+def psp_settings(d):
+    """The game's options, as the settings its player reads."""
     o = {}
     try:
         for line in open(os.path.join(d, 'options.txt')):
@@ -330,6 +329,160 @@ def package_psp_mac(info, game, name, out, d):
         env['PSP_FULLSCREEN'] = 1
     if o.get('fps'):
         env['PSP_FPS'] = o['fps']
+    return env
+
+
+TOOLCHAINS = os.path.expanduser('~/Library/Application Support/Genexia/toolchains')
+PC = {
+    'windows': {'zig': 'x86_64-windows-gnu', 'label': 'Windows',
+                'ffmpeg': 'ffmpeg-win/ffmpeg-n9.0-latest-win64-lgpl-shared-9.0',
+                'sdl': 'sdl2-win/SDL2-2.32.10/x86_64-w64-mingw32',
+                'libs': ['avcodec-63.dll', 'avutil-61.dll', 'swresample-7.dll']},
+    'linux': {'zig': 'x86_64-linux-gnu.2.28', 'label': 'Linux',
+              'ffmpeg': 'ffmpeg-linux/ffmpeg-n9.0-latest-linux64-lgpl-shared-9.0',
+              'libs': ['libavcodec.so.63', 'libavutil.so.61', 'libswresample.so.7']},
+}
+
+
+def zig():
+    z = shutil.which('zig') or next((p for p in ('/opt/homebrew/bin/zig', '/usr/local/bin/zig') if os.path.exists(p)), None)
+    if not z:
+        fail('Packaging for Windows and Linux needs zig: brew install zig')
+    return z
+
+
+def psp_objects(d, system, cc):
+    """The game's recompiled code, compiled for another system. Kept, and redone only where the code changed."""
+    code, objects = os.path.join(d, 'code'), os.path.join(d, 'obj-' + system)
+    os.makedirs(objects, exist_ok=True)
+    sources = sorted(n for n in os.listdir(code) if n.endswith('.c'))
+    todo = [n for n in sources if not os.path.exists(os.path.join(objects, n[:-2] + '.o'))
+            or os.path.getmtime(os.path.join(objects, n[:-2] + '.o')) < os.path.getmtime(os.path.join(code, n))]
+
+    def one(name):
+        out = os.path.join(objects, name[:-2] + '.o')
+        r = subprocess.run(cc + ['-O1', '-c', os.path.join(code, name), '-o', out + '.new'], capture_output=True, text=True)
+        if not r.returncode:
+            os.replace(out + '.new', out)
+        return r
+
+    finished = 0
+    say(event='progress', label='Compiling', done=0, total=len(todo))
+    with cf.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+        for r in pool.map(one, todo):
+            if r.returncode:
+                fail('The compiler stopped: ' + r.stderr.strip()[:300])
+            finished += 1
+            say(event='progress', label='Compiling', done=finished, total=len(todo))
+    return [os.path.join(objects, n[:-2] + '.o') for n in sources]
+
+
+def windows_icon(png_path, ico, work):
+    """An .ico holding PNG pictures, which Windows reads since Vista."""
+    pictures = []
+    for size in (256, 48, 32, 16):
+        f = os.path.join(work, f'icon{size}.png')
+        must(['sips', '-z', str(size), str(size), png_path, '-s', 'format', 'png', '--out', f])
+        pictures.append((size, open(f, 'rb').read()))
+    with open(ico, 'wb') as f:
+        f.write(struct.pack('<HHH', 0, 1, len(pictures)))
+        at = 6 + 16 * len(pictures)
+        for size, data in pictures:
+            f.write(struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(data), at))
+            at += len(data)
+        for _, data in pictures:
+            f.write(data)
+
+
+def package_psp_pc(info, game, name, out, d, system):
+    """A folder for Windows or Linux on x86-64: the OpenGL player, the game's program,
+    its disc, game.txt with its settings, and FFmpeg. Linux uses the system's SDL2."""
+    t = PC[system]
+    z = zig()
+    ffmpeg = os.path.join(TOOLCHAINS, t['ffmpeg'])
+    if not os.path.isdir(ffmpeg) or (system == 'windows' and not os.path.isdir(os.path.join(TOOLCHAINS, t['sdl']))):
+        fail(f'Packaging for {t["label"]} needs its SDL2 and FFmpeg builds in {TOOLCHAINS}.')
+    src, build = os.path.join(REPO, 'src/backends/psp'), os.path.join(REPO, 'build')
+    subprocess.run([sys.executable, os.path.join(REPO, 'tools/psp_nids.py'), os.path.join(build, 'psp_nids.h')], check=True, capture_output=True)
+    cc = [z, 'cc', '-target', t['zig'], '-w', '-std=gnu11', '-I' + os.path.join(REPO, 'src/chips'), '-I' + build, '-I' + src]
+    say(event='packaging', id='compile')
+    objects = psp_objects(d, system, cc)
+
+    folder = os.path.join(out, f'{name} ({t["label"]})')
+    work = tempfile.mkdtemp(prefix='genexia-package')
+    try:
+        new = os.path.join(work, 'game')
+        os.makedirs(new)
+        say(event='packaging', id='runtime')
+        cc += ['-O2', '-DPSP_WINDOW', '-DPSP_GL', '-I' + os.path.join(ffmpeg, 'include')]
+        player = [os.path.join(src, n) for n in ('psp_runtime.c', 'psp_vfpu.c', 'psp_ge.c', 'psp_gl.c')]
+        if system == 'windows':
+            sdl = os.path.join(TOOLCHAINS, t['sdl'])
+            cc += ['-I' + os.path.join(sdl, 'include/SDL2')]
+            player.append(os.path.join(src, 'psp_os_win.c'))
+            shot = os.path.join(d, 'cartridge.png')
+            shot = shot if os.path.exists(shot) else os.path.join(d, 'shot.png')
+            if os.path.exists(shot):
+                say(event='packaging', id='icon')
+                windows_icon(shot, os.path.join(work, 'game.ico'), work)
+                with open(os.path.join(work, 'game.rc'), 'w') as f:
+                    f.write('1 ICON "game.ico"\n')
+                player.append(os.path.join(work, 'game.rc'))
+            exe = os.path.join(new, name + '.exe')
+            libs = ['-L' + os.path.join(sdl, 'lib'), '-L' + os.path.join(ffmpeg, 'lib'), '-lmingw32', '-lSDL2main', '-lSDL2',
+                    '-lavcodec', '-lavutil', '-lgdi32', '-lwinmm', '-limm32', '-lole32', '-loleaut32', '-lversion',
+                    '-lsetupapi', '-luuid', '-lcfgmgr32', '-Wl,--subsystem,windows', '-s']
+            lib_from, lib_to = os.path.join(ffmpeg, 'bin'), new
+        else:
+            sdl_headers = subprocess.run(['sdl2-config', '--cflags'], capture_output=True, text=True).stdout.split()
+            cc += [f for f in sdl_headers if f.startswith('-I')]
+            stub = os.path.join(work, 'sdl')        # the system's SDL2, by its stable library name
+            os.makedirs(stub)
+            names = set()
+            for n in player:
+                r = subprocess.run(cc + ['-c', n, '-o', os.path.join(stub, os.path.basename(n) + '.o')], capture_output=True, text=True)
+                if r.returncode:
+                    fail('The player would not compile: ' + r.stderr.strip()[:300])
+                names |= set(re.findall(r'\b(SDL_\w+)\b', subprocess.run(['nm', '-u', os.path.join(stub, os.path.basename(n) + '.o')],
+                                                                         capture_output=True, text=True).stdout))
+            with open(os.path.join(stub, 'stub.c'), 'w') as f:
+                f.write(''.join(f'void {n}(void) {{}}\n' for n in sorted(names)))
+            must([z, 'cc', '-target', t['zig'], '-shared', '-Wl,-soname,libSDL2-2.0.so.0', os.path.join(stub, 'stub.c'),
+                  '-o', os.path.join(stub, 'libSDL2-2.0.so.0')])
+            player = [os.path.join(stub, os.path.basename(n) + '.o') for n in player]
+            exe = os.path.join(new, name)
+            libs = ['-L' + stub, '-l:libSDL2-2.0.so.0', '-L' + os.path.join(ffmpeg, 'lib'), '-Wl,--no-as-needed',
+                    '-lswresample', '-lavcodec', '-lavutil', '-lm', "-Wl,-rpath,$ORIGIN/lib", '-s']
+            lib_from, lib_to = os.path.join(ffmpeg, 'lib'), os.path.join(new, 'lib')
+        r = subprocess.run(cc + player + objects + libs + ['-o', exe], capture_output=True, text=True, cwd=work)
+        if r.returncode:
+            fail('Linking stopped: ' + r.stderr.strip()[:300])
+
+        say(event='packaging', id='assemble')
+        os.makedirs(lib_to, exist_ok=True)
+        for n in t['libs']:
+            shutil.copy(os.path.join(lib_from, n), os.path.join(lib_to, n))
+        shutil.copy(os.path.join(ffmpeg, 'LICENSE.txt'), os.path.join(lib_to, 'FFmpeg LICENSE.txt'))
+        shutil.copy(os.path.join(d, 'game.elf'), os.path.join(new, 'game.elf'))
+        with open(os.path.join(new, 'game.txt'), 'w') as f:
+            f.write(f'id {game}\n' + ''.join(f'{k} {v}\n' for k, v in psp_settings(d).items()))
+        say(event='packaging', id='disc')
+        shutil.copy(info['rom'], os.path.join(new, 'game.iso'))
+        os.makedirs(out, exist_ok=True)
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+        shutil.move(new, folder)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    size = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(folder) for f in fs)
+    say(event='packaged', app=folder, name=name, bytes=size)
+
+
+def package_psp_mac(info, game, name, out, d):
+    """A Mac app holding the PSP player, the game's program and its disc."""
+    if not os.path.exists(os.path.join(d, 'play_metal')):
+        fail('This game has not been compiled yet.')
+    env = psp_settings(d)
     app = os.path.join(out, name + '.app')
     work = tempfile.mkdtemp(prefix='genexia-package')
     try:
@@ -386,7 +539,7 @@ def main():
     for k, v in zip(a[1::2], a[2::2]):
         if k == '--out':
             out = v
-        elif k == '--target' and v in ('arm', 'intel', 'ppc', 'psp'):
+        elif k == '--target' and v in ('arm', 'intel', 'ppc', 'psp', 'windows', 'linux'):
             target = v
         else:
             sys.exit('bad option ' + k)
@@ -398,10 +551,12 @@ def main():
     except OSError:
         fail('This game has not been built yet.')
     if info['console'] == 'PSP':
-        if target != 'arm':
-            fail('PSP games package for Apple Silicon Macs so far.')
+        if target not in ('arm', 'windows', 'linux'):
+            fail('PSP games package for Apple Silicon Macs, Windows and Linux so far.')
         if not os.path.exists(info['rom']):
             fail('The disc has moved: ' + info['rom'])
+        if target != 'arm':
+            return package_psp_pc(info, game, app_name(info), out, d, target)
         return package_psp_mac(info, game, app_name(info), out, d)
     lib = os.path.join(d, 'game.dylib')
     if not os.path.exists(lib):

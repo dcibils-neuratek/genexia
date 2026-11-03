@@ -62,7 +62,7 @@ static u32 save_write(u32 q, const u8 *name) {
     char dir[64], file[16], path[96];
     save_folder(q, name, dir, sizeof dir);
     save_clean(file, sizeof file, M(q + SAVE_FILE), 13);
-    mkdir("saves", 0755); mkdir(dir, 0755);
+    psp_mkdir("saves"); psp_mkdir(dir);
     snprintf(path, sizeof path, "%s/%s", dir, file);
     char temporary[104];
     snprintf(temporary, sizeof temporary, "%s.new", path);    /* a crash mid-write leaves the old save whole */
@@ -70,7 +70,7 @@ static u32 save_write(u32 q, const u8 *name) {
     if (!f) return SAVE_WRITE_FAIL;
     const u32 size = RD32(q + SAVE_SIZE);
     const size_t wrote = fwrite(M(RD32(q + SAVE_BUF)), 1, size, f);
-    if (fclose(f) || wrote != size || rename(temporary, path)) return SAVE_WRITE_FAIL;
+    if (fclose(f) || wrote != size || psp_replace(temporary, path)) return SAVE_WRITE_FAIL;
     return 0;
 }
 

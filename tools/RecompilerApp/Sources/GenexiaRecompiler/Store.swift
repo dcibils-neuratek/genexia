@@ -90,7 +90,7 @@ struct PackageJob: Identifiable {
 
 /// The machines a game can be packaged for.
 enum PackageTarget: String, CaseIterable, Identifiable {
-    case arm, intel, ppc, psp
+    case arm, intel, ppc, psp, windows, linux
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -98,6 +98,8 @@ enum PackageTarget: String, CaseIterable, Identifiable {
         case .intel: return "Mac Intel"
         case .ppc: return "Mac PowerPC: Mac OS 9 disk for G3, G4 (G5 in Classic)"
         case .psp: return "Sony PSP: folder for PSP/GAME, SNES games"
+        case .windows: return "Windows PC (64-bit): folder, PSP games"
+        case .linux: return "Linux PC (64-bit): folder, PSP games, uses the system's SDL2"
         }
     }
     func available(_ g: Game) -> Bool {
@@ -105,6 +107,7 @@ enum PackageTarget: String, CaseIterable, Identifiable {
         case .ppc: return g.os9Library != nil
         case .psp: return g.console == "SNES"
         case .arm: return !g.isPSP || g.instructions > 0
+        case .windows, .linux: return g.isPSP && g.instructions > 0
         default: return !g.isPSP
         }
     }
@@ -115,6 +118,10 @@ enum PackageTarget: String, CaseIterable, Identifiable {
                              ("icon", "Make the icon", "photo"), ("assemble", "Put the app together", "shippingbox")]
         case .ppc: return [("runtime", "Build the Mac OS 9 emulators", "cpu"), ("disk", "Write the disk", "opticaldisc")]
         case .psp: return [("compile", "Compile the game and chips for PSP", "hammer"), ("assemble", "Put the folder together", "shippingbox")]
+        case .windows: return [("compile", "Compile the game for Windows", "hammer"), ("runtime", "Build the player", "cpu"), ("icon", "Make the icon", "photo"),
+                               ("assemble", "Put the folder together", "shippingbox"), ("disc", "Copy the disc", "opticaldisc")]
+        case .linux: return [("compile", "Compile the game for Linux", "hammer"), ("runtime", "Build the player", "cpu"),
+                             ("assemble", "Put the folder together", "shippingbox"), ("disc", "Copy the disc", "opticaldisc")]
         }
     }
 }

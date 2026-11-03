@@ -1,9 +1,18 @@
 # Genexia
 
-**Genexia is a console recompilation platform for macOS.** It translates a game's
-code into native Mac code and runs it on reimplemented console hardware, with one
-shared front end for every console: video filters, options menu, controls, speed,
-run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES and Nintendo 64.
+**Genexia turns console games into native programs.** It works in three steps:
+
+1. **Your ROM goes in.** You supply a game you own: a cartridge ROM or a disc image.
+2. **Genexia decompiles it and recompiles it into native code.** The console's machine
+   code is translated into C and compiled for a real computer's processor. It then runs
+   on reimplemented console hardware instead of being emulated one instruction at a time.
+3. **Genexia packages it for many systems.** Each game becomes a standalone app for
+   Apple Silicon and Intel Macs, PowerPC Macs (iMac G4, Power Mac G5), and Linux and
+   Windows, which are being added now.
+
+Every console shares one front end: video filters, options menu, controls, speed,
+run-ahead and save states. Backends today: Sega Genesis / Mega Drive, SNES, Nintendo 64,
+PlayStation and PSP.
 
 > **Genexia does not provide ROMs.** You should own the real game and supply the ROM
 > yourself. The idea behind this project is to enjoy our games with new generations and

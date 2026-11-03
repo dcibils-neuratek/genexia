@@ -585,7 +585,7 @@ struct PackageSheet: View {
     @EnvironmentObject var store: Store
     let job: PackageJob
     var steps: [(id: String, title: String, icon: String)] {
-        job.psp ? [("icon", "Make the icon", "photo"), ("assemble", "Put the app together with the disc", "shippingbox")] : job.target.steps
+        job.psp && job.target == .arm ? [("icon", "Make the icon", "photo"), ("assemble", "Put the app together with the disc", "shippingbox")] : job.target.steps
     }
     var current: Int { steps.firstIndex { $0.id == job.step } ?? -1 }
     var succeeded: Bool { job.finished && job.problem == nil }

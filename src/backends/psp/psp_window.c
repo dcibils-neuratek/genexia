@@ -40,6 +40,33 @@ static u8 stick(SDL_GameControllerAxis axis) {
 
 static void window_sound(void *unused, Uint8 *out, int bytes) { audio_drain((s16 *)out, bytes / 4); }
 
+/* A packaged game holds game.elf, game.iso and game.txt beside the player. game.txt
+ * names the game ("id ULUS10007") and its settings ("PSP_SCALE 4"); saves go to the
+ * user's own folder for it, where the system lets a program write. */
+static void window_packaged(int *argc, char ***argv) {
+    char *base = SDL_GetBasePath();
+    if (!base) return;
+    static char elf[1024], iso[1024], txt[1024], id[64] = "game";
+    static char *args[4];
+    snprintf(elf, sizeof elf, "%sgame.elf", base);
+    snprintf(iso, sizeof iso, "%sgame.iso", base);
+    snprintf(txt, sizeof txt, "%sgame.txt", base);
+    SDL_free(base);
+    FILE *f = psp_fopen(txt, "r");
+    if (!f) return;
+    char line[256], k[64], v[160];
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "%63s %159[^\r\n]", k, v) == 2) {
+            if (!strcmp(k, "id")) snprintf(id, sizeof id, "%s", v);
+            else psp_setenv(k, v);                      /* the player's own settings still win */
+        }
+    fclose(f);
+    char *saves = SDL_GetPrefPath("Genexia Games", id);
+    if (saves) { psp_chdir(saves); SDL_free(saves); }
+    args[0] = (*argv)[0]; args[1] = elf; args[2] = iso; args[3] = "999999";
+    *argc = 4; *argv = args;
+}
+
 static void window_open(const char *title) {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO);
     SDL_AudioSpec want = { .freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = window_sound };

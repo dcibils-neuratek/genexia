@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
-#include <sys/mman.h>
+#include "psp_os.h"
 #include <time.h>
 #include "allegrex.h"
 #include "psp_nids.h"
@@ -521,17 +521,21 @@ static void hle(int i) {
 }
 
 int main(int argc, char **argv) {
+#ifdef PSP_WINDOW
+    if (argc < 3) window_packaged(&argc, &argv);        /* a packaged game: everything beside the player */
+#endif
     if (argc < 3) return 1;
 #ifdef PSP_WINDOW
     window_open("Genexia");
 #endif
-    psp_mem = mmap(NULL, 0x20000000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    psp_mem = psp_reserve(0x20000000);
+    if (!psp_mem) { puts("not enough memory for the PSP's"); return 1; }
     if (getenv("PSP_FPS") && atoi(getenv("PSP_FPS")) > 0) vblank_us = VBLANK_US * 30 / atoi(getenv("PSP_FPS"));
     next_vblank_at = vblank_us;
     blocks = calloc(CODE_SLOTS, sizeof *blocks);
     import_of = calloc(CODE_SLOTS, sizeof *import_of);
-    iso = fopen(argv[2], "rb");
-    FILE *f = fopen(argv[1], "rb");
+    iso = psp_fopen(argv[2], "rb");
+    FILE *f = psp_fopen(argv[1], "rb");
     if (!f || !iso) { puts("can't open the program or the disc"); return 1; }
     static u8 h[0x1000];
     fread(h, 1, sizeof h, f);
@@ -543,7 +547,11 @@ int main(int argc, char **argv) {
     fclose(f);
     heap = (va + msz + 0xFFF) & ~0xFFFu;
     psp_register_game();
+#ifdef _WIN32
+    lg = stdout;
+#else
     lg = fopen("/dev/stdout", "w");
+#endif
     const double limit = argc > 3 ? atof(argv[3]) : 30;
 
     const int m = new_thread("main", entry, 32, 0x40000);
