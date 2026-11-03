@@ -358,7 +358,8 @@ struct PSPOptions: View {
             row("Resolution", \.scale, [(2, "960×544"), (4, "1920×1088"), (6, "2880×1632"), (8, "3840×2176")])
             row("Anti-aliasing", \.msaa, [(1, "Off"), (2, "2×"), (4, "4×")])
             row("Window", \.window, [(0, "Small"), (1, "Large"), (2, "Full screen")])
-            Text("Applies the next time the game starts. Arrows D-pad, Z Cross, X Circle, A Square, S Triangle, Q and W shoulders, Return Start, Tab Select, or a gamepad. Cmd-F switches full screen.")
+            row("Frame rate", \.fps, [(0, "Game's own"), (60, "60 fps")])
+            Text("Applies the next time the game starts. 60 fps doubles a game that runs at 30; one whose game speed follows its frames would run fast too. Arrows D-pad, Z Cross, X Circle, A Square, S Triangle, Q and W shoulders, Return Start, Tab Select, or a gamepad. Cmd-F switches full screen.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))

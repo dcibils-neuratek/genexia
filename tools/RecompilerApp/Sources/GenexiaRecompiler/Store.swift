@@ -128,6 +128,7 @@ struct GameOptions: Equatable {
     var scale = 4       // PSP: times its resolution
     var msaa = 4        // PSP: anti-aliasing samples
     var window = 1      // PSP: 0 960x544, 1 1920x1088, 2 full screen
+    var fps = 0         // PSP: 0 the game's own pace, or frames a second for one that draws every second vblank
 
     init() {}
     init(file: URL) {
@@ -145,13 +146,14 @@ struct GameOptions: Equatable {
             case "scale": scale = v
             case "msaa": msaa = v
             case "window": window = v
+            case "fps": fps = v
             default: break
             }
         }
     }
 
     func save(to file: URL) {
-        let t = "picture \(picture)\nfilter \(filter)\nsprites \(sprites)\nrunahead \(runahead)\nspeed \(speed)\nrecord \(record)\nscale \(scale)\nmsaa \(msaa)\nwindow \(window)\n"
+        let t = "picture \(picture)\nfilter \(filter)\nsprites \(sprites)\nrunahead \(runahead)\nspeed \(speed)\nrecord \(record)\nscale \(scale)\nmsaa \(msaa)\nwindow \(window)\nfps \(fps)\n"
         try? t.write(to: file, atomically: true, encoding: .utf8)
     }
 }
@@ -445,6 +447,7 @@ final class Store: ObservableObject {
         let d = gamesDir.appendingPathComponent(game.id), o = game.options
         var settings = ["PSP_SCALE": String(o.scale), "PSP_MSAA": String(o.msaa)]
         if o.window == 2 { settings["PSP_FULLSCREEN"] = "1" }
+        if o.fps > 0 { settings["PSP_FPS"] = String(o.fps) }
         settings["PSP_SIZE"] = o.window == 0 ? "960x544" : "1920x1088"
         run([d.appendingPathComponent("play_metal").path, "game.elf", game.romPath, "999999"], folder: d, settings: settings,
             onLine: { _ in }, finished: { [weak self] code in
