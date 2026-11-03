@@ -8,7 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "allegrex.h"
-#ifdef PSP_METAL
+#if defined(PSP_METAL) || defined(PSP_GL)
+#define PSP_GPU             /* drawn on the GPU through psp_metal.h, by Metal or OpenGL */
+#endif
+#ifdef PSP_GPU
 #include "psp_metal.h"
 #endif
 
@@ -74,7 +77,7 @@ static void decode_dxt(const u8 *src, u32 *out, int w, int h, int stride, int fm
     }
 }
 static const Tex *decoded(Tex *t) {
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     u32 h = 2166136261u;
     for (int i = 0; i < t->w * t->h; i++) h = (h ^ t->px[i]) * 16777619u;
     if (h != t->hash || !t->gpu) { mtl_texture(&t->gpu, t->w, t->h, t->w, t->px); t->hash = h; }
@@ -246,7 +249,7 @@ static inline void shade(int x, int y, float z, float u, float v, float r, float
     }
     pixel(x, y, z, cr, cg, cb, ca);
 }
-#ifdef PSP_METAL
+#ifdef PSP_GPU
 static MtlVert *out_v; static int out_n, out_cap;
 static void emit(const Vtx *v, const Vtx *colour) {
     if (out_n == out_cap) { out_cap = out_cap ? out_cap * 2 : 4096; out_v = realloc(out_v, (size_t)out_cap * sizeof *out_v); }
@@ -290,7 +293,7 @@ static void triangle(Vtx a, Vtx b, Vtx c, const Tex *t, int smooth) {
     float area = edge(a.x, a.y, b.x, b.y, c.x, c.y);
     if (area == 0) return;
     if ((ge[0x1D] & 1) && !(ge[0xD3] & 1) && ((area > 0) == !(ge[0x9B] & 1))) return;
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     emit(&a, smooth ? &a : &c); emit(&b, smooth ? &b : &c); emit(&c, &c);
     return;
 #endif
@@ -313,7 +316,7 @@ static void triangle(Vtx a, Vtx b, Vtx c, const Tex *t, int smooth) {
     }
 }
 static void rect(const Vtx *a, const Vtx *b, const Tex *t) {
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     Vtx p = *a, q = *a, r = *b, s = *b;
     p.w = q.w = r.w = s.w = 1; p.z = q.z = r.z = s.z = b->z;
     q.x = b->x; q.u = b->u; s.x = a->x; s.u = a->u;
@@ -537,7 +540,7 @@ static void prim(u32 d) {
         default: break;                            /* points and lines */
         }
     }
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     gpu_flush(t);
 #endif
     if (idx) iaddr += (u32)count * (idx == 1 ? 1 : 2);

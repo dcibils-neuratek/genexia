@@ -2,11 +2,14 @@
  * Included by psp_runtime.c when built with -DPSP_WINDOW. Game time follows
  * real time, shown a frame at each flip. */
 #include <SDL.h>
+#if defined(PSP_METAL) || defined(PSP_GL)
+#define PSP_GPU             /* drawn on the GPU through psp_metal.h, by Metal or OpenGL */
+#endif
 
 void psp_ge_rgba(u32 addr, int stride, int fmt, u32 *out);
 
 static SDL_Window *win;
-#ifdef PSP_METAL
+#ifdef PSP_GPU
 #include "psp_metal.h"
 #else
 static SDL_Renderer *ren;
@@ -42,10 +45,20 @@ static void window_open(const char *title) {
     SDL_AudioSpec want = { .freq = 44100, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024, .callback = window_sound };
     const SDL_AudioDeviceID speakers = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
     if (speakers) SDL_PauseAudioDevice(speakers, 0);
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     int w = 480 * window_scale, h = 272 * window_scale;
     if (getenv("PSP_SIZE")) sscanf(getenv("PSP_SIZE"), "%dx%d", &w, &h);
-    win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_METAL);
+#ifdef PSP_GL
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    const Uint32 api = SDL_WINDOW_OPENGL;
+#else
+    const Uint32 api = SDL_WINDOW_METAL;
+#endif
+    win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | api);
     SDL_SetWindowMinimumSize(win, 240, 136);
     if (getenv("PSP_FULLSCREEN")) SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
     mtl_open(win, getenv("PSP_SCALE") ? atoi(getenv("PSP_SCALE")) : 4, getenv("PSP_MSAA") ? atoi(getenv("PSP_MSAA")) : 4);
@@ -61,7 +74,7 @@ static void window_open(const char *title) {
 
 static void window_flip(u32 addr, int stride, int fmt) {
     static u32 px[480 * 272];
-#ifdef PSP_METAL
+#ifdef PSP_GPU
     const u32 at = addr & 0x0FFFFFFF;
     if (!mtl_drawn(at)) psp_ge_rgba(addr, stride, fmt, px);
     mtl_present(at, mtl_drawn(at) ? NULL : px);
