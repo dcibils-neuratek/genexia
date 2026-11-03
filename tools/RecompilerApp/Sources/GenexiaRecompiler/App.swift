@@ -278,16 +278,14 @@ struct GameDetail: View {
                     .disabled(game.os9Library == nil || game.building)
             }
             Spacer()
-            if !game.isPSP {
-                Menu {
-                    ForEach(PackageTarget.allCases) { t in
-                        Button(t.title) { store.package(game, for: t) }.disabled(!t.available(game))
-                    }
-                } label: { Label("Package App", systemImage: "shippingbox") }
-                    .fixedSize()
-                    .disabled(game.building || game.queued || store.packaging != nil)
-                    .help("Make an app of this game that runs on its own, for the Mac you choose")
-            }
+            Menu {
+                ForEach(PackageTarget.allCases) { t in
+                    Button(t.title) { store.package(game, for: t) }.disabled(!t.available(game))
+                }
+            } label: { Label("Package App", systemImage: "shippingbox") }
+                .fixedSize()
+                .disabled(game.building || game.queued || store.packaging != nil)
+                .help("Make an app of this game that runs on its own, for the Mac you choose")
             Button { store.reveal(game) } label: { Image(systemName: "folder") }.help("Show the library in Finder")
             Button { store.removing = game } label: { Image(systemName: "trash") }
                 .disabled(game.building || game.queued).help("Remove this game from Genexia")
@@ -586,7 +584,9 @@ struct SavesCard: View {
 struct PackageSheet: View {
     @EnvironmentObject var store: Store
     let job: PackageJob
-    var steps: [(id: String, title: String, icon: String)] { job.target.steps }
+    var steps: [(id: String, title: String, icon: String)] {
+        job.psp ? [("icon", "Make the icon", "photo"), ("assemble", "Put the app together with the disc", "shippingbox")] : job.target.steps
+    }
     var current: Int { steps.firstIndex { $0.id == job.step } ?? -1 }
     var succeeded: Bool { job.finished && job.problem == nil }
 

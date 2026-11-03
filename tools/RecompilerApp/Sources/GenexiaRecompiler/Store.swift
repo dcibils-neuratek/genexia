@@ -78,6 +78,7 @@ struct PackageJob: Identifiable {
     let id = UUID()
     let title: String
     let target: PackageTarget
+    var psp = false
     var step = ""
     var done = 0
     var total = 0
@@ -103,6 +104,7 @@ enum PackageTarget: String, CaseIterable, Identifiable {
         switch self {
         case .ppc: return g.os9Library != nil
         case .psp: return g.console == "SNES"
+        case .arm: return !g.isPSP || g.instructions > 0
         default: return !g.isPSP
         }
     }
@@ -519,7 +521,7 @@ final class Store: ObservableObject {
 
     /// Makes a game that runs on its own: emulators, ROM and native code together.
     func package(_ game: Game, for target: PackageTarget) {
-        packaging = PackageJob(title: game.title.capitalized, target: target)
+        packaging = PackageJob(title: game.title.capitalized, target: target, psp: game.isPSP)
         writeIcon(game)
         run(["python3", repo + "/tools/package_game.py", game.id, "--target", target.rawValue], onLine: { [weak self] line in
             guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }

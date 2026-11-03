@@ -8,7 +8,8 @@ library, its options and SDL, so it runs with neither Genexia nor this project
 around. It contains the ROM: it is for your own use, and it lands outside the
 repository so it can't be committed.
 
-arm and intel make a Mac app. ppc makes an HFS disk image for Mac OS 9 holding
+arm and intel make a Mac app; a PSP game packages for arm only, with its disc
+and the Homebrew libraries its player uses inside. ppc makes an HFS disk image for Mac OS 9 holding
 the app, library and ROM side by side. Prints one line of JSON per event, like
 genexia_recompile.py.
 """
@@ -65,6 +66,7 @@ def app_name(info):
     """The ROM's file name reads better than the shouted cartridge title."""
     stem = os.path.splitext(os.path.basename(info['rom']))[0]
     name = re.sub(r'\s*[(\[].*?[)\]]', '', stem).strip()
+    name = re.sub(r'^\d+ - ', '', name)            # a collection's number, as in "0017 - "
     return re.sub(r'[/:]', ' ', name) or info['title'].title()
 
 
@@ -274,6 +276,108 @@ def bundle_sdl(app, intel=False):
             break
 
 
+def bundle_dylibs(exe, frameworks):
+    """Copies every Homebrew library exe needs, and theirs, beside it and points each at its copy."""
+    os.makedirs(frameworks, exist_ok=True)
+    todo, done = [exe], set()
+    while todo:
+        f = todo.pop()
+        for line in must(['otool', '-L', f]).splitlines()[1:]:
+            dep = line.split()[0]
+            if not dep.startswith('/opt/homebrew/'):
+                continue
+            base = os.path.basename(dep)
+            copy = os.path.join(frameworks, base)
+            if base not in done:
+                done.add(base)
+                shutil.copy(os.path.realpath(dep), copy)
+                os.chmod(copy, 0o755)
+                must(['install_name_tool', '-id', '@loader_path/' + base, copy])
+                todo.append(copy)
+            new = ('@executable_path/../Frameworks/' if f == exe else '@loader_path/') + base
+            must(['install_name_tool', '-change', dep, new, f])
+    # Homebrew's SDL2 is sdl2-compat, which loads SDL3 from beside itself
+    if 'libSDL2-2.0.0.dylib' in done and os.path.exists('/opt/homebrew/lib/libSDL3.dylib'):
+        sdl3 = os.path.join(frameworks, 'libSDL3.dylib')
+        shutil.copy(os.path.realpath('/opt/homebrew/lib/libSDL3.dylib'), sdl3)
+        os.chmod(sdl3, 0o755)
+        must(['install_name_tool', '-id', '@loader_path/libSDL3.dylib', sdl3])
+
+
+PSP_LAUNCH = '''#!/bin/sh
+# saves go where the app can write, not inside it
+here="$(cd "$(dirname "$0")" && pwd)"
+res="$here/../Resources"
+mkdir -p "$HOME/Library/Application Support/Genexia Games/%s" && cd "$HOME/Library/Application Support/Genexia Games/%s" || exit 1
+%sexec "$here/play_metal" "$res/game.elf" "$res/game.iso" 999999
+'''
+
+
+def package_psp_mac(info, game, name, out, d):
+    """A Mac app holding the PSP player, the game's program and its disc."""
+    if not os.path.exists(os.path.join(d, 'play_metal')):
+        fail('This game has not been compiled yet.')
+    o = {}
+    try:
+        for line in open(os.path.join(d, 'options.txt')):
+            k, _, v = line.partition(' ')
+            o[k] = int(v)
+    except (OSError, ValueError):
+        pass
+    env = {'PSP_SCALE': o.get('scale', 4), 'PSP_MSAA': o.get('msaa', 4),
+           'PSP_SIZE': '960x544' if o.get('window', 1) == 0 else '1920x1088'}
+    if o.get('window') == 2:
+        env['PSP_FULLSCREEN'] = 1
+    if o.get('fps'):
+        env['PSP_FPS'] = o['fps']
+    app = os.path.join(out, name + '.app')
+    work = tempfile.mkdtemp(prefix='genexia-package')
+    try:
+        say(event='packaging', id='icon')
+        new = os.path.join(work, name + '.app')
+        res, macos = os.path.join(new, 'Contents/Resources'), os.path.join(new, 'Contents/MacOS')
+        os.makedirs(res)
+        os.makedirs(macos)
+        shot = os.path.join(d, 'cartridge.png')     # the UMD the Recompiler draws, else the disc's picture
+        shot = shot if os.path.exists(shot) else os.path.join(d, 'shot.png')
+        if os.path.exists(shot):
+            make_icon(None, os.path.join(res, 'game.icns'), work, shot)
+
+        say(event='packaging', id='assemble')
+        exe = os.path.join(macos, 'play_metal')
+        shutil.copy(os.path.join(d, 'play_metal'), exe)
+        shutil.copy(os.path.join(d, 'game.elf'), os.path.join(res, 'game.elf'))
+        shutil.copy(info['rom'], os.path.join(res, 'game.iso'))
+        bundle_dylibs(exe, os.path.join(new, 'Contents/Frameworks'))
+        launch = os.path.join(macos, 'launch')
+        with open(launch, 'w') as f:
+            f.write(PSP_LAUNCH % (game, game, ''.join(f'export {k}={v}\n' for k, v in env.items())))
+        os.chmod(launch, 0o755)
+        with open(os.path.join(new, 'Contents/Info.plist'), 'wb') as f:
+            plist = {
+                'CFBundleExecutable': 'launch',
+                'CFBundleIdentifier': 'local.genexia.game.' + game,
+                'CFBundleName': name,
+                'CFBundleDisplayName': name,
+                'CFBundlePackageType': 'APPL',
+                'CFBundleShortVersionString': '1.0',
+                'LSMinimumSystemVersion': '11.0',
+                'NSHighResolutionCapable': True,
+            }
+            if os.path.exists(shot):
+                plist['CFBundleIconFile'] = 'game'
+            plistlib.dump(plist, f)
+        must(['codesign', '--force', '-s', '-', '--deep', new])
+        os.makedirs(out, exist_ok=True)
+        if os.path.exists(app):
+            shutil.rmtree(app)
+        shutil.move(new, app)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    size = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(app) for f in fs)
+    say(event='packaged', app=app, name=name, bytes=size)
+
+
 def main():
     a = sys.argv[1:]
     if not a:
@@ -293,6 +397,12 @@ def main():
             info = json.load(f)
     except OSError:
         fail('This game has not been built yet.')
+    if info['console'] == 'PSP':
+        if target != 'arm':
+            fail('PSP games package for Apple Silicon Macs so far.')
+        if not os.path.exists(info['rom']):
+            fail('The disc has moved: ' + info['rom'])
+        return package_psp_mac(info, game, app_name(info), out, d)
     lib = os.path.join(d, 'game.dylib')
     if not os.path.exists(lib):
         fail('This game has no native library yet. Build it first.')
