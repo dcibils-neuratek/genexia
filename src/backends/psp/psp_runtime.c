@@ -53,12 +53,13 @@ u32 psp_trap(u32 pc, u32 inst) { static char t[64]; snprintf(t, sizeof t, "trap 
 /* --------------------------------------------------------------- threads */
 enum { FREE, READY, WAIT_TIME, WAIT_SEMA, WAIT_FLAG, WAIT_SLEEP, WAIT_END, DONE };
 typedef struct {
-    int state, prio, id, need, mode, wakeups; u32 out; u64 until; int timed; char name[32];
+    int state, prio, id, need, mode, wakeups, intr_off; u32 out, stack, stack_size; u64 until; int timed; char name[32];
     PspCpu cpu;
 } Thread;
 #define MAX_THREADS 64
 static Thread th[MAX_THREADS];
 static int cur;
+static int intr_off;      /* the running thread is inside sceKernelCpuSuspendIntr: nothing may cut in */
 #define UID(i) (0x1000 + (i))
 #define TID(u) ((int)(u) - 0x1000)
 #define ERR_NOT_FOUND 0x80020198u
@@ -66,6 +67,18 @@ static int cur;
 static u32 stack_top = 0x09FFFF00u, heap = 0;
 static u32 alloc_low(u32 n) { u32 a = heap; heap = (heap + n + 63) & ~63u; return a; }
 static u32 alloc_high(u32 n) { stack_top = (stack_top - n) & ~63u; return stack_top; }
+
+/* a deleted thread's stack waits here for the next thread of its size */
+static struct { u32 at, size; } spare_stacks[MAX_THREADS];
+static u32 stack_for(u32 size) {
+    for (int i = 0; i < MAX_THREADS; i++) if (spare_stacks[i].size == size) { spare_stacks[i].size = 0; return spare_stacks[i].at; }
+    return alloc_high(size);
+}
+static void delete_thread(Thread *t) {
+    if (t->state == FREE) return;
+    t->state = FREE;
+    for (int i = 0; i < MAX_THREADS; i++) if (!spare_stacks[i].size) { spare_stacks[i].at = t->stack; spare_stacks[i].size = t->stack_size; return; }
+}
 
 static int new_thread(const char *name, u32 entry, int prio, u32 stack) {
     for (int i = 0; i < MAX_THREADS; i++) if (th[i].state == FREE) {
@@ -75,7 +88,9 @@ static int new_thread(const char *name, u32 entry, int prio, u32 stack) {
         t->state = DONE;                    /* dormant until started */
         t->prio = prio;
         t->cpu.pc = entry;
-        const u32 top = alloc_high(stack ? stack : 0x40000) + (stack ? stack : 0x40000);
+        t->stack_size = stack ? stack : 0x40000;
+        t->stack = stack_for(t->stack_size);
+        const u32 top = t->stack + t->stack_size;
         t->cpu.r[29] = (top - 0x100) & ~15u;
         t->cpu.r[31] = IDLE_PC;
         t->cpu.r[28] = p.r[28];
@@ -100,7 +115,7 @@ static u32 put_return[MAX_THREADS];
 
 static void schedule(void) {
     if (in_intr) return;
-    th[cur].cpu = p;
+    th[cur].cpu = p; th[cur].intr_off = intr_off; intr_off = 0;      /* a wait lets interrupts in until the thread is back */
     for (;;) {
         int best = -1;
         for (int k = 1; k <= MAX_THREADS; k++) {     /* round robin among equals */
@@ -112,7 +127,7 @@ static void schedule(void) {
             }
             if (t->state == READY && (best < 0 || t->prio < th[best].prio)) best = i;
         }
-        if (best >= 0) { cur = best; p = th[cur].cpu; return; }
+        if (best >= 0) { cur = best; p = th[cur].cpu; intr_off = th[cur].intr_off; return; }
         u64 soon = ~0ull;
         for (int i = 0; i < MAX_THREADS; i++) if (th[i].state != FREE && th[i].state != DONE && th[i].timed && th[i].until < soon) soon = th[i].until;
         const u64 intr = intr_next();
@@ -124,6 +139,7 @@ static void schedule(void) {
 }
 /* a more urgent thread whose wait just ended takes over, as the sound thread must */
 static int urgent_due(void) {
+    if (intr_off) return 0;
     for (int i = 0; i < MAX_THREADS; i++) if (th[i].timed && th[i].state != FREE && th[i].state != DONE && th[i].until <= now_us && th[i].prio < th[cur].prio) return 1;
     return 0;
 }
@@ -250,18 +266,22 @@ static void hle(int i) {
         u32 sp = d->cpu.r[29];
         if (n2 && src) { sp = (sp - n2 - 16) & ~15u; memcpy(M(sp), M(src), n2); d->cpu.r[5] = sp; d->cpu.r[29] = sp - 32; }
         d->cpu.r[4] = n2; d->state = READY;
-        if (d->prio < th[cur].prio) { th[cur].state = READY; schedule(); }
+        if (d->prio < th[cur].prio && !intr_off) { th[cur].state = READY; schedule(); }
     }
     else if (IS("sceKernelTerminateDeleteThread") || IS("sceKernelTerminateThread")) {      /* another thread: the caller carries on */
         const int t = TID(A0);
-        if (t >= 0 && t < MAX_THREADS && t != cur) { th[t].state = IS("sceKernelTerminateThread") ? DONE : FREE; th[t].timed = 0; }
+        if (t >= 0 && t < MAX_THREADS && t != cur) { if (IS("sceKernelTerminateThread")) th[t].state = DONE; else delete_thread(&th[t]); th[t].timed = 0; }
     }
     else if (IS("sceKernelExitThread") || IS("sceKernelExitDeleteThread")) {
         th[cur].state = DONE;
         for (int k = 0; k < MAX_THREADS; k++) if (th[k].state == WAIT_END && th[k].id == cur) { th[k].state = READY; th[k].timed = 0; }
+        if (IS("sceKernelExitDeleteThread")) delete_thread(&th[cur]);
         schedule();
     }
-    else if (IS("sceKernelDeleteThread")) { const int t = TID(A0); if (t >= 0 && t < MAX_THREADS) th[t].state = FREE; }
+    else if (IS("sceKernelDeleteThread")) { const int t = TID(A0); if (t >= 0 && t < MAX_THREADS) delete_thread(&th[t]); }
+    else if (IS("sceKernelCpuSuspendIntr")) { RET(!intr_off); intr_off = 1; }
+    else if (IS("sceKernelCpuResumeIntr") || IS("sceKernelCpuResumeIntrWithSync")) intr_off = !A0;
+    else if (IS("sceKernelIsCpuIntrEnable")) RET(!intr_off);
     else if (IS("sceKernelGetThreadId")) RET(UID(cur));
     else if (IS("sceKernelSysClock2USec")) { const u64 c = (u64)RD32(A0 + 4) << 32 | RD32(A0); if (A1) WR32(A1, (u32)(c / 1000000)); if (A2) WR32(A2, (u32)(c % 1000000)); }
     else if (IS("sceKernelSysClock2USecWide")) { const u64 c = (u64)A1 << 32 | A0; if (A2) WR32(A2, (u32)(c / 1000000)); if (A3) WR32(A3, (u32)(c % 1000000)); }
@@ -506,6 +526,8 @@ int main(int argc, char **argv) {
     window_open("Genexia");
 #endif
     psp_mem = mmap(NULL, 0x20000000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (getenv("PSP_FPS") && atoi(getenv("PSP_FPS")) > 0) vblank_us = VBLANK_US * 30 / atoi(getenv("PSP_FPS"));
+    next_vblank_at = vblank_us;
     blocks = calloc(CODE_SLOTS, sizeof *blocks);
     import_of = calloc(CODE_SLOTS, sizeof *import_of);
     iso = fopen(argv[2], "rb");
@@ -566,9 +588,11 @@ int main(int argc, char **argv) {
         if (!(ran & 63)) now_us++;
         if (!(ran & 0xFFFFF)) {
             if ((double)(clock() - start) / CLOCKS_PER_SEC > limit) stop_reason = "time limit";
-            psp_tick();
-            th[cur].state = READY;     /* a thread polling memory still has to let others run */
-            schedule();
+            if (!intr_off) {
+                psp_tick();
+                th[cur].state = READY;     /* a thread polling memory still has to let others run */
+                schedule();
+            }
         }
     }
     fflush(lg);

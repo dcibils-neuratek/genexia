@@ -321,6 +321,7 @@ void mtl_open(void *sdl_window, int scale, int msaa) {
     for (samples = msaa < 1 ? 1 : msaa; samples > 1 && ![dev supportsTextureSampleCount:(NSUInteger)samples]; samples--) {}
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = YES;
+    if (getenv("PSP_FPS") && atoi(getenv("PSP_FPS")) > 60) layer.displaySyncEnabled = NO;     /* faster than the screen: show each frame as it comes */
     int w, h;
     SDL_Metal_GetDrawableSize(sdl_window, &w, &h);
     layer.drawableSize = CGSizeMake(w, h);

@@ -6,11 +6,16 @@
 #define INTR_STACK  0x08803FF0u
 #define VBLANK_US   16683
 
+/* PSP_FPS=60: the vblank interrupt comes FPS/30 times as often. Most 3D games
+ * count these to draw every second vblank, so they run at FPS; one that keys
+ * its game logic to the count instead of the clock runs fast too. */
+static u64 vblank_us = VBLANK_US;
+
 static int in_intr;
 static struct { u32 fn, arg; int on; } vblank_sub[32];
 static struct { u32 fn, arg; u64 at; } alarms[16];
 static u32 ge_signal_fn, ge_signal_arg, ge_finish_fn, ge_finish_arg;
-static u64 next_vblank_at = VBLANK_US;
+static u64 next_vblank_at;
 int psp_ge_finishes, psp_ge_signals;
 
 static void hle(int i);
@@ -45,9 +50,9 @@ static u64 intr_next(void) {
 }
 
 static void psp_tick(void) {
-    if (in_intr) return;
+    if (in_intr || intr_off) return;
     if (now_us >= next_vblank_at) {
-        next_vblank_at = (now_us / VBLANK_US + 1) * VBLANK_US;
+        next_vblank_at = (now_us / vblank_us + 1) * vblank_us;
         for (int i = 0; i < 32; i++) if (vblank_sub[i].on && vblank_sub[i].fn) call_guest(vblank_sub[i].fn, (u32)i, vblank_sub[i].arg);
     }
     for (int i = 0; i < 16; i++) if (alarms[i].fn && alarms[i].at <= now_us) {
