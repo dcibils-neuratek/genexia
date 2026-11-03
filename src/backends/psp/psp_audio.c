@@ -54,7 +54,7 @@ static void audio_drain(s16 *out, int frames) {
 }
 
 typedef struct {
-    u32 vag, size, at; int loop, on, ended, pitch, left, right;
+    u32 vag, size, at, loop_at; int loop, on, ended, pitch, left, right;
     int hist1, hist2, count; u32 frac; s16 block[28]; int have; float level; int releasing;
 } SasVoice;
 static SasVoice voices[SAS_VOICES];
@@ -62,10 +62,11 @@ static int sas_grain = 1024;
 
 static int vag_block(SasVoice *v) {
     static const int f0[5] = { 0, 60, 115, 98, 122 }, f1[5] = { 0, 0, -52, -55, -60 };
-    if (v->at + 16 > v->size) { if (!v->loop) return 0; v->at = 0; }
+    if (v->at + 16 > v->size) return 0;
     const u32 a = v->vag + v->at;
     const int head = RD8(a), flags = RD8(a + 1), shift = head & 15, filter = (head >> 4) & 7;
-    if (flags == 7) { if (!v->loop) return 0; v->at = 0; return vag_block(v); }
+    if (flags == 7) return 0;
+    if (flags == 6) v->loop_at = v->at;     /* a sample loops only where its own markers say, whatever the voice asks */
     v->at += 16;
     if (filter > 4) return 0;
     for (int i = 0; i < 28; i++) {
@@ -75,7 +76,8 @@ static int vag_block(SasVoice *v) {
         s = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
         v->block[i] = (s16)s; v->hist2 = v->hist1; v->hist1 = s;
     }
-    if ((flags & 1) && !(flags & 2)) { if (!v->loop) v->size = v->at; }
+    if (flags == 3 && v->loop) v->at = v->loop_at;
+    else if (flags & 1) v->size = v->at;
     v->have = 28; v->count = 0;
     return 1;
 }
@@ -107,7 +109,7 @@ static void sas_mix(u32 out) {
 
 static void sas_key_on(int k) {
     SasVoice *v = &voices[k];
-    v->at = 0; v->hist1 = v->hist2 = 0; v->frac = 0; v->count = 0; v->have = 0; v->level = 1; v->releasing = 0; v->ended = 0;
+    v->at = v->loop_at = 0; v->hist1 = v->hist2 = 0; v->frac = 0; v->count = 0; v->have = 0; v->level = 1; v->releasing = 0; v->ended = 0;
     v->on = vag_block(v);
     if (!v->on) v->ended = 1;
 }

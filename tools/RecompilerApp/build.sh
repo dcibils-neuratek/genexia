@@ -22,5 +22,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>GenexiaRepo</key><string>$ROOT</string>
 </dict></plist>
 PLIST
-codesign -s - "$APP" 2>/dev/null || true
+# A real identity keeps macOS's folder permissions across rebuilds; ad-hoc looks like a new app each time.
+ID="$(security find-identity -v -p codesigning | awk -F'"' 'NR==1 && NF>1 {print $2}')"
+if [ -z "$ID" ] || ! codesign -s "$ID" "$APP" 2>/dev/null; then codesign -s - "$APP" 2>/dev/null || true; fi
 echo "$APP"
