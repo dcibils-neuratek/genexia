@@ -191,8 +191,13 @@ struct AllGames: View {
                 return nil
             }
             guard e.locationInWindow.x > 280 else { return e }      // the sidebar scrolls itself
+            let delta = abs(e.scrollingDeltaX) > abs(e.scrollingDeltaY) ? e.scrollingDeltaX : e.scrollingDeltaY
+            if !e.hasPreciseScrollingDeltas {       // a mouse wheel: one game a notch
+                if delta != 0 { pick(at + (delta < 0 ? 1 : -1)) }
+                return nil
+            }
             if e.phase == .began { scrolled = 0 }
-            scrolled += abs(e.scrollingDeltaX) > abs(e.scrollingDeltaY) ? e.scrollingDeltaX : e.scrollingDeltaY
+            scrolled += delta
             if abs(scrolled) > 44 {
                 pick(at + (scrolled < 0 ? 1 : -1))
                 scrolled = 0
