@@ -21,9 +21,8 @@ struct Cartridge: View {
         .aspectRatio(1, contentMode: .fit)
     }
 
-    func sticker(_ ctx: GraphicsContext, _ r: CGRect, _ top: Color, _ bottom: Color) {
-        var c = ctx
-        c.clip(to: Path(roundedRect: r, cornerRadius: 0.4))
+    /// The game's art filling a shape, or the console's colours when there is none.
+    func printed(_ c: GraphicsContext, _ r: CGRect, _ top: Color, _ bottom: Color) {
         if let label, label.size.width > 0, label.size.height > 0 {
             let k = max(r.width / label.size.width, r.height / label.size.height)
             let w = label.size.width * k, h = label.size.height * k
@@ -32,6 +31,12 @@ struct Cartridge: View {
             c.fill(Path(r), with: .linearGradient(Gradient(colors: [top, bottom]),
                 startPoint: CGPoint(x: r.minX, y: r.minY), endPoint: CGPoint(x: r.maxX, y: r.maxY)))
         }
+    }
+
+    func sticker(_ ctx: GraphicsContext, _ r: CGRect, _ top: Color, _ bottom: Color) {
+        var c = ctx
+        c.clip(to: Path(roundedRect: r, cornerRadius: 0.4))
+        printed(c, r, top, bottom)
         if let title {
             let band = CGRect(x: r.minX, y: r.maxY - 2.6, width: r.width, height: 2.6)
             c.fill(Path(band), with: .linearGradient(Gradient(colors: [.clear, .black.opacity(0.8)]),
@@ -131,20 +136,56 @@ struct Cartridge: View {
         sticker(ctx, CGRect(x: 2.4, y: 6.3, width: 19.2, height: 9.8), Color(red: 0.15, green: 0.4, blue: 0.9), Color(red: 0.85, green: 0.25, blue: 0.2))
     }
 
-    /// A disc in a rounded shell, seen through its window, with a label across the top.
+    /// A white shell, round on top and square-shouldered below, with the disc seen through a
+    /// round window: the game's art printed around a plain hub, the title on a band at the foot.
     func umd(_ ctx: GraphicsContext) {
-        let shell = Color(white: 0.16), line = Color(white: 0.36)
-        let body = Path(roundedRect: CGRect(x: 2, y: 2, width: 20, height: 21), cornerRadius: 2.4)
-        ctx.fill(body, with: .color(shell))
-        light(ctx, body)
-        ctx.stroke(body, with: .color(line), lineWidth: 0.3)
-        let disc = CGRect(x: 6.5, y: 13.4, width: 11, height: 11)
-        var window = ctx
-        window.clip(to: body)
-        window.fill(Path(ellipseIn: disc), with: .linearGradient(Gradient(colors: [Color(white: 0.8), Color(white: 0.45), Color(white: 0.75)]),
-            startPoint: CGPoint(x: disc.minX, y: disc.minY), endPoint: CGPoint(x: disc.maxX, y: disc.maxY)))
-        window.fill(Path(ellipseIn: disc.insetBy(dx: 4.2, dy: 4.2)), with: .color(shell))
-        sticker(ctx, CGRect(x: 3.4, y: 3.4, width: 17.2, height: 9.8), Color(red: 0.95, green: 0.55, blue: 0.15), Color(red: 0.75, green: 0.2, blue: 0.25))
+        let centre = CGPoint(x: 12, y: 11.5), r = 9.1, hub = 4.3
+        var body = Path()
+        body.move(to: CGPoint(x: 1.9, y: 11.6))
+        body.addArc(center: CGPoint(x: 12, y: 11.6), radius: 10.1, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        body.addCurve(to: CGPoint(x: 22.6, y: 19), control1: CGPoint(x: 22.1, y: 14.5), control2: CGPoint(x: 22.6, y: 17))
+        body.addCurve(to: CGPoint(x: 19.8, y: 22.2), control1: CGPoint(x: 22.6, y: 21), control2: CGPoint(x: 21.6, y: 22))
+        body.addQuadCurve(to: CGPoint(x: 4.2, y: 22.2), control: CGPoint(x: 12, y: 23.2))
+        body.addCurve(to: CGPoint(x: 1.4, y: 19), control1: CGPoint(x: 2.4, y: 22), control2: CGPoint(x: 1.4, y: 21))
+        body.addCurve(to: CGPoint(x: 1.9, y: 11.6), control1: CGPoint(x: 1.4, y: 17), control2: CGPoint(x: 1.9, y: 14.5))
+        body.closeSubpath()
+        ctx.fill(body, with: .linearGradient(Gradient(colors: [Color(white: 0.97), Color(white: 0.84)]),
+                                             startPoint: CGPoint(x: 0, y: 1.5), endPoint: CGPoint(x: 0, y: 23)))
+        ctx.stroke(body, with: .color(Color(white: 0.6)), lineWidth: 0.15)
+
+        let circle = { (radius: Double) in CGRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2) }
+        ctx.fill(Path(ellipseIn: circle(r + 0.45)), with: .color(Color(white: 0.3)))
+        ctx.fill(Path(ellipseIn: circle(r + 0.2)), with: .color(Color(white: 0.72)))
+
+        var disc = ctx
+        disc.clip(to: Path(ellipseIn: circle(r)))
+        printed(disc, circle(r), Color(red: 0.25, green: 0.3, blue: 0.5), Color(red: 0.75, green: 0.3, blue: 0.2))
+        let band = CGRect(x: centre.x - r, y: centre.y + 4.9, width: r * 2, height: r - 4.9)
+        if let title {
+            disc.fill(Path(band), with: .color(Color(red: 0.62, green: 0.13, blue: 0.1).opacity(0.92)))
+            let words = title.split(separator: " ")
+            var first = words.count, length = 0
+            for (i, w) in words.enumerated() where length < title.count / 2 { length += w.count + 1; first = i + 1 }
+            let lines = [words[..<first], words[first...]].map { $0.joined(separator: " ") }.filter { !$0.isEmpty }
+            for (i, line) in lines.enumerated() {
+                disc.draw(Text(line).font(.system(size: 0.8, weight: .heavy, design: .rounded)).foregroundColor(.white),
+                          at: CGPoint(x: centre.x, y: band.minY + (lines.count == 1 ? 1.5 : 0.95 + Double(i))))
+            }
+        }
+        ctx.fill(Path(ellipseIn: circle(hub + 0.25)), with: .color(.black.opacity(0.2)))
+        ctx.fill(Path(ellipseIn: circle(hub)), with: .color(Color(white: 0.95)))
+        ctx.draw(Text("UMD").font(.system(size: 2.3, weight: .regular)).foregroundColor(Color(red: 0.25, green: 0.45, blue: 0.75)), at: centre)
+
+        var glass = ctx
+        glass.clip(to: Path(ellipseIn: circle(r)))
+        glass.fill(Path(ellipseIn: circle(r).offsetBy(dx: -3.5, dy: -6)), with: .color(.white.opacity(0.09)))
+
+        ctx.draw(Text("PSP").font(.system(size: 0.95, weight: .semibold)).foregroundColor(Color(white: 0.55)), at: CGPoint(x: 4.1, y: 20.6))
+        var pad = Path()
+        pad.addRoundedRect(in: CGRect(x: 18.9, y: 19.9, width: 2.3, height: 0.95), cornerSize: CGSize(width: 0.4, height: 0.4))
+        pad.addEllipse(in: CGRect(x: 18.7, y: 20.3, width: 0.8, height: 1.1))
+        pad.addEllipse(in: CGRect(x: 20.6, y: 20.3, width: 0.8, height: 1.1))
+        ctx.fill(pad, with: .color(Color(white: 0.55)))
     }
 
     func plain(_ ctx: GraphicsContext) {
