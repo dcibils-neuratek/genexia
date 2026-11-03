@@ -64,6 +64,17 @@ let systems = [
         Chip(name: "RDP", job: "Draws the picture", clock: "62.5 MHz"),
         Chip(name: "EEPROM", job: "Cartridge saves"),
         Chip(name: "SRAM, Flash", job: "Other cartridge saves", state: .missing)
+    ]),
+    System(name: "PSP", year: "2004", abilities: [
+        Ability(name: "Emulate", detail: "Code the game loads itself runs on an interpreter", yes: true),
+        Ability(name: "Recompile", detail: "From this app, for discs with an unencrypted program", yes: true),
+        Ability(name: "Package", detail: "Not yet", yes: false)
+    ], chips: [
+        Chip(name: "Allegrex", job: "Main CPU and FPU", clock: "333 MHz", state: .native),
+        Chip(name: "VFPU", job: "Vector maths", state: .native),
+        Chip(name: "GE", job: "3D picture, redrawn on Metal", clock: "166 MHz"),
+        Chip(name: "Media Engine", job: "ATRAC3+ and H.264, through FFmpeg"),
+        Chip(name: "Wi-Fi", job: "Network play", state: .missing)
     ])
 ]
 

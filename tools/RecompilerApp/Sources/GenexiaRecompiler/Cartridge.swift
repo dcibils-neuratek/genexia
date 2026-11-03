@@ -14,6 +14,7 @@ struct Cartridge: View {
             case "SNES": snes(ctx)
             case "Nintendo 64": n64(ctx)
             case "Genesis": genesis(ctx)
+            case "PSP": umd(ctx)
             default: plain(ctx)
             }
         }
@@ -128,6 +129,22 @@ struct Cartridge: View {
         ctx.stroke(recess, with: .color(line), lineWidth: 0.3)
         ctx.fill(Path(CGRect(x: 2.4, y: 4.2, width: 19.2, height: 2.1)), with: .color(Color(white: 0.2)))
         sticker(ctx, CGRect(x: 2.4, y: 6.3, width: 19.2, height: 9.8), Color(red: 0.15, green: 0.4, blue: 0.9), Color(red: 0.85, green: 0.25, blue: 0.2))
+    }
+
+    /// A disc in a rounded shell, seen through its window, with a label across the top.
+    func umd(_ ctx: GraphicsContext) {
+        let shell = Color(white: 0.16), line = Color(white: 0.36)
+        let body = Path(roundedRect: CGRect(x: 2, y: 2, width: 20, height: 21), cornerRadius: 2.4)
+        ctx.fill(body, with: .color(shell))
+        light(ctx, body)
+        ctx.stroke(body, with: .color(line), lineWidth: 0.3)
+        let disc = CGRect(x: 6.5, y: 13.4, width: 11, height: 11)
+        var window = ctx
+        window.clip(to: body)
+        window.fill(Path(ellipseIn: disc), with: .linearGradient(Gradient(colors: [Color(white: 0.8), Color(white: 0.45), Color(white: 0.75)]),
+            startPoint: CGPoint(x: disc.minX, y: disc.minY), endPoint: CGPoint(x: disc.maxX, y: disc.maxY)))
+        window.fill(Path(ellipseIn: disc.insetBy(dx: 4.2, dy: 4.2)), with: .color(shell))
+        sticker(ctx, CGRect(x: 3.4, y: 3.4, width: 17.2, height: 9.8), Color(red: 0.95, green: 0.55, blue: 0.15), Color(red: 0.75, green: 0.2, blue: 0.25))
     }
 
     func plain(_ ctx: GraphicsContext) {

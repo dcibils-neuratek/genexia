@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 let accent = Color(red: 0.36, green: 0.62, blue: 1.0)
 let romNotice = "Genexia doesn't provide ROMs. You should own the real game and supply your own ROM."
-let romExtensions: Set<String> = ["sfc", "smc", "md", "gen", "bin", "z64", "n64", "v64"]
+let romExtensions: Set<String> = ["sfc", "smc", "md", "gen", "bin", "z64", "n64", "v64", "iso"]
 
 @main
 struct RecompilerApp: App {
@@ -111,9 +111,9 @@ struct DropHint: View {
         Button { picking = true } label: {
             VStack(spacing: big ? 12 : 4) {
                 Image(systemName: "square.and.arrow.down").font(.system(size: big ? 44 : 16, weight: .light)).foregroundStyle(accent)
-                Text(big ? "Drop a ROM here" : "Drop or choose a ROM").font(big ? .title2.weight(.medium) : .caption)
+                Text(big ? "Drop a ROM or disc here" : "Drop or choose a ROM").font(big ? .title2.weight(.medium) : .caption)
                 if big {
-                    Text("SNES and Nintendo 64 today. Genesis is recognized and coming next.").font(.callout).foregroundStyle(.secondary)
+                    Text("SNES, Nintendo 64 and PSP today. PSP discs in Downloads or on the Desktop appear by themselves. Genesis is recognized and coming next.").font(.callout).foregroundStyle(.secondary)
                     Text(romNotice).font(.caption).foregroundStyle(.tertiary).multilineTextAlignment(.center)
                 }
             }
@@ -145,7 +145,7 @@ struct InfoButton: View {
 
 struct ConsoleBadge: View {
     let console: String
-    var color: Color { console == "SNES" ? .purple : console == "Genesis" ? .blue : console.isEmpty ? .gray : .green }
+    var color: Color { console == "SNES" ? .purple : console == "Genesis" ? .blue : console == "PSP" ? .orange : console.isEmpty ? .gray : .green }
     var body: some View {
         Text(console.isEmpty ? "?" : console == "Nintendo 64" ? "N64" : console)
             .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -228,6 +228,15 @@ struct GameDetail: View {
                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         }
+        if game.isPSP { PSPStatus(game: game) } else { nativeCards }
+        if !game.log.isEmpty {
+            Text(game.log.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                .padding(10).background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    @ViewBuilder var nativeCards: some View {
         StatusCard(game: game)
         if game.waiting > 0 || !game.isN64 { WaitingCard(game: game) }
         ExplorerView(explorer: store.explorer(for: game.id), building: game.building, nativePercent: game.nativePercent, facts: store.facts(for: game))
@@ -241,31 +250,30 @@ struct GameDetail: View {
             Stat(value: size(game.libraryBytes), label: "Mac library")
             if !game.isN64 { Stat(value: size(game.os9Bytes), label: "iMac library") }
         }
-        if !game.log.isEmpty {
-            Text(game.log.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                .padding(10).background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-        }
     }
 
     var compileBar: some View {
         HStack {
-            Button { store.rebuild(game) } label: { Label("Grow again", systemImage: "arrow.triangle.2.circlepath") }
+            Button { store.rebuild(game) } label: {
+                Label(!game.isPSP ? "Grow again" : game.instructions > 0 ? "Compile again" : "Compile", systemImage: "arrow.triangle.2.circlepath")
+            }
                 .disabled(game.building || game.queued)
-                .help("Keeps everything found so far, adds iMac recordings, sends the bots to play again, recompiles and re-verifies")
-            if !game.isN64 {
+                .help(game.isPSP ? "Recompiles the game with the latest Genexia" : "Keeps everything found so far, adds iMac recordings, sends the bots to play again, recompiles and re-verifies")
+            if !game.isN64 && !game.isPSP {
                 Button { store.sendToIMac(game) } label: { Label("Send to iMac", systemImage: "desktopcomputer") }
                     .disabled(game.os9Library == nil || game.building)
             }
             Spacer()
-            Menu {
-                ForEach(PackageTarget.allCases) { t in
-                    Button(t.title) { store.package(game, for: t) }.disabled(!t.available(game))
-                }
-            } label: { Label("Package App", systemImage: "shippingbox") }
-                .fixedSize()
-                .disabled(game.building || game.queued || store.packaging != nil)
-                .help("Make an app of this game that runs on its own, for the Mac you choose")
+            if !game.isPSP {
+                Menu {
+                    ForEach(PackageTarget.allCases) { t in
+                        Button(t.title) { store.package(game, for: t) }.disabled(!t.available(game))
+                    }
+                } label: { Label("Package App", systemImage: "shippingbox") }
+                    .fixedSize()
+                    .disabled(game.building || game.queued || store.packaging != nil)
+                    .help("Make an app of this game that runs on its own, for the Mac you choose")
+            }
             Button { store.reveal(game) } label: { Image(systemName: "folder") }.help("Show the library in Finder")
             Button { store.removing = game } label: { Image(systemName: "trash") }
                 .disabled(game.building || game.queued).help("Remove this game from Genexia")
@@ -279,11 +287,12 @@ struct GameDetail: View {
                 Label("Play", systemImage: "play.fill").font(.system(size: 16, weight: .semibold)).padding(.horizontal, 22).padding(.vertical, 8)
             }
             .buttonStyle(.borderedProminent).tint(accent).disabled(game.building || game.problem != nil)
-            Text(game.nativePercent > 0 ? String(format: "%.1f%% native", game.nativePercent) : "Not measured yet")
+            Text(game.isPSP ? (game.instructions > 0 ? "Native code with Metal graphics" : "Compiles first")
+                 : game.nativePercent > 0 ? String(format: "%.1f%% native", game.nativePercent) : "Not measured yet")
                 .font(.callout).foregroundStyle(.secondary)
             Spacer()
         }
-        OptionsCard(game: game)
+        if game.isPSP { PSPOptions(game: game) } else { OptionsCard(game: game) }
         SavesCard(game: game)
     }
 
@@ -292,6 +301,53 @@ struct GameDetail: View {
     }
     func size(_ n: Int) -> String {
         n == 0 ? "–" : String(format: "%.1f MB", Double(n) / 1_048_576)
+    }
+}
+
+/// Where a PSP game stands: discs compile in one go, with no bots or checks against an emulator.
+struct PSPStatus: View {
+    let game: Game
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(game.building ? "Building" : game.instructions > 0 ? "Ready to play" : "Nothing compiled yet")
+                .font(.system(size: 19, weight: .bold, design: .rounded))
+            StatusRow(state: game.instructions > 0 ? .done : .open, text: game.instructions > 0
+                      ? "\(game.instructions.formatted()) instructions compiled, \(String(format: "%.1f", game.reachedPercent))% of the program"
+                      : "Compile turns this disc's program into native code")
+            Text("The rest of the program is data, or code the game loads itself, which runs on the built-in interpreter. Compile again after updating Genexia.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// How a PSP game is drawn on this Mac. Applies the next time it starts.
+struct PSPOptions: View {
+    @EnvironmentObject var store: Store
+    let game: Game
+
+    func row(_ title: String, _ path: WritableKeyPath<GameOptions, Int>, _ choices: [(Int, String)]) -> some View {
+        Picker(title, selection: Binding(get: { game.options[keyPath: path] }, set: {
+            var o = game.options
+            o[keyPath: path] = $0
+            store.setOptions(game, o)
+        })) {
+            ForEach(choices, id: \.0) { Text($0.1).tag($0.0) }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Options for this game").font(.headline)
+            row("Resolution", \.scale, [(2, "960×544"), (4, "1920×1088"), (6, "2880×1632"), (8, "3840×2176")])
+            row("Anti-aliasing", \.msaa, [(1, "Off"), (2, "2×"), (4, "4×")])
+            row("Window", \.window, [(0, "Small"), (1, "Large"), (2, "Full screen")])
+            Text("Applies the next time the game starts. Arrows D-pad, Z Cross, X Circle, A Square, S Triangle, Q and W shoulders, Return Start, Tab Select, or a gamepad. Cmd-F switches full screen.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -492,7 +548,7 @@ struct SavesCard: View {
                 }
             }
             if saves.isEmpty {
-                Text("Nothing saved yet. Press F5 in game to save your place and F7 to load it.").font(.caption).foregroundStyle(.secondary)
+                Text(game.isPSP ? "Nothing saved yet." : "Nothing saved yet. Press F5 in game to save your place and F7 to load it.").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(saves) { s in
                 HStack(spacing: 10) {
@@ -505,7 +561,7 @@ struct SavesCard: View {
                     Text(s.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text("Cartridge saves are kept by packaged apps. Save states work everywhere.").font(.caption).foregroundStyle(.secondary)
+            Text(game.isPSP ? "Saved by the game itself, from its own menus." : "Cartridge saves are kept by packaged apps. Save states work everywhere.").font(.caption).foregroundStyle(.secondary)
         }
         .padding(14).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
@@ -772,7 +828,7 @@ struct Stat: View {
 
 struct StepStrip: View {
     let game: Game
-    var steps: [(id: String, title: String, icon: String)] { game.isN64 ? buildSteps.filter { $0.id != "os9" } : buildSteps }
+    var steps: [(id: String, title: String, icon: String)] { game.isPSP ? pspBuildSteps : game.isN64 ? buildSteps.filter { $0.id != "os9" } : buildSteps }
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Array(steps.enumerated()), id: \.offset) { i, s in

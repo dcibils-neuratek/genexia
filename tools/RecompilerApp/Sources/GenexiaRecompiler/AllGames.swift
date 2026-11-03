@@ -128,24 +128,26 @@ struct AllGames: View {
                 Text(state(g)).font(.callout).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button { store.play(g) } label: {
-                        Label("Play", systemImage: "play.fill").labelStyle(.titleAndIcon).font(.system(size: 14, weight: .semibold)).padding(.horizontal, 10).padding(.vertical, 2)
+                        Label(g.isPSP && g.instructions == 0 ? "Compile" : "Play", systemImage: "play.fill").labelStyle(.titleAndIcon).font(.system(size: 14, weight: .semibold)).padding(.horizontal, 10).padding(.vertical, 2)
                     }
                     .buttonStyle(.borderedProminent).tint(accent).disabled(g.building || g.problem != nil)
                     Button { open(g, .compile) } label: { Label("Compile", systemImage: "cpu").labelStyle(.titleAndIcon) }
-                    Menu {
-                        ForEach(PackageTarget.allCases) { t in
-                            Button(t.title) { store.package(g, for: t) }.disabled(!t.available(g))
-                        }
-                    } label: { Label("Package", systemImage: "shippingbox") }
-                        .fixedSize()
-                        .disabled(g.building || g.queued || store.packaging != nil)
+                    if !g.isPSP {
+                        Menu {
+                            ForEach(PackageTarget.allCases) { t in
+                                Button(t.title) { store.package(g, for: t) }.disabled(!t.available(g))
+                            }
+                        } label: { Label("Package", systemImage: "shippingbox") }
+                            .fixedSize()
+                            .disabled(g.building || g.queued || store.packaging != nil)
+                    }
                     Button { store.removing = g } label: { Image(systemName: "trash") }
                         .disabled(g.building || g.queued).help("Remove this game from Genexia")
                 }
                 .fixedSize()
             }
             Spacer(minLength: 0)
-            NativeRing(percent: g.nativePercent)
+            if !g.isPSP { NativeRing(percent: g.nativePercent) }
         }
         .padding(14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -157,6 +159,7 @@ struct AllGames: View {
         if let p = g.problem { return p }
         if g.instructions == 0 { return "Not compiled yet" }
         let facts = store.facts(for: g).prefix(2).map(\.value)
+        if g.isPSP { return (facts + ["\(g.instructions.formatted()) instructions compiled"]).joined(separator: " · ") }
         return (facts + [g.nativePercent >= 99.95 ? "Fully native" : "Runs native, more to find by playing"]).joined(separator: " · ")
     }
 

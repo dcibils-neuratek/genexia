@@ -16,6 +16,7 @@ func romFacts(path: String, console: String) -> [RomFact] {
     let mb = String(format: "%.3g MB", Double(size) / 1_048_576)
     if console == "SNES" { return snesFacts(head, size: Int(size), mb: mb) }
     if console == "Nintendo 64" { return n64Facts(head, mb: mb) }
+    if console == "PSP" { return [RomFact(label: "Disc", value: mb)] }
     return [RomFact(label: "ROM", value: mb)]
 }
 

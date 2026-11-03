@@ -22,6 +22,7 @@ struct Game: Identifiable, Equatable {
     var mismatches: Int = 0
     var os9Library: String? = nil
     var problem: String? = nil
+    var reachedPercent: Double = 0
 
     // a build in progress
     var building = false
@@ -36,6 +37,7 @@ struct Game: Identifiable, Equatable {
     var progressStart = Date()
 
     var isN64: Bool { console == "Nintendo 64" }
+    var isPSP: Bool { console == "PSP" }
 }
 
 let buildSteps: [(id: String, title: String, icon: String)] = [
@@ -46,6 +48,13 @@ let buildSteps: [(id: String, title: String, icon: String)] = [
     ("measure", "Measure", "gauge.with.needle"),
     ("verify", "Verify", "checkmark.seal"),
     ("os9", "iMac library", "desktopcomputer"),
+]
+
+let pspBuildSteps: [(id: String, title: String, icon: String)] = [
+    ("inspect", "Inspect", "magnifyingglass"),
+    ("discover", "Find code", "point.topleft.down.curvedto.point.bottomright.up"),
+    ("compile", "Compile", "cpu"),
+    ("link", "Link", "link"),
 ]
 
 enum InfoPage { case library, how, systems }
@@ -92,7 +101,7 @@ enum PackageTarget: String, CaseIterable, Identifiable {
         switch self {
         case .ppc: return g.os9Library != nil
         case .psp: return g.console == "SNES"
-        default: return true
+        default: return !g.isPSP
         }
     }
     var steps: [(id: String, title: String, icon: String)] {
@@ -114,6 +123,9 @@ struct GameOptions: Equatable {
     var runahead = 0
     var speed = 100
     var record = 1
+    var scale = 4       // PSP: times its resolution
+    var msaa = 4        // PSP: anti-aliasing samples
+    var window = 1      // PSP: 0 960x544, 1 1920x1088, 2 full screen
 
     init() {}
     init(file: URL) {
@@ -128,13 +140,16 @@ struct GameOptions: Equatable {
             case "runahead": runahead = v
             case "speed": speed = v
             case "record": record = v
+            case "scale": scale = v
+            case "msaa": msaa = v
+            case "window": window = v
             default: break
             }
         }
     }
 
     func save(to file: URL) {
-        let t = "picture \(picture)\nfilter \(filter)\nsprites \(sprites)\nrunahead \(runahead)\nspeed \(speed)\nrecord \(record)\n"
+        let t = "picture \(picture)\nfilter \(filter)\nsprites \(sprites)\nrunahead \(runahead)\nspeed \(speed)\nrecord \(record)\nscale \(scale)\nmsaa \(msaa)\nwindow \(window)\n"
         try? t.write(to: file, atomically: true, encoding: .utf8)
     }
 }
@@ -164,6 +179,10 @@ final class Store: ObservableObject {
 
     init() {
         reload()
+        findDiscs()
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.findDiscs() }
+        }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.countWaiting(); self?.fetchArt() }
         }
@@ -184,6 +203,19 @@ final class Store: ObservableObject {
                 games[i].waiting = new.count
                 explorer(for: games[i].id).setWaiting(Array(new))
             }
+        }
+    }
+
+    private var findingDiscs = false
+
+    /// PSP discs in Downloads or on the Desktop come onto the shelf by themselves, ready to compile.
+    func findDiscs() {
+        guard !findingDiscs else { return }
+        findingDiscs = true
+        var found = false
+        run(["python3", repo + "/tools/psp_game.py", "scan"], onLine: { _ in found = true }) { [weak self] _ in
+            self?.findingDiscs = false
+            if found { self?.reload() }
         }
     }
 
@@ -222,7 +254,9 @@ final class Store: ObservableObject {
             g.checkedBlocks = j["checked_blocks"] as? Int ?? 0
             g.mismatches = j["mismatches"] as? Int ?? 0
             g.os9Library = j["os9_library"] as? String
-            if g.status == "building" { g.problem = "This build didn't finish. Use Grow again to complete it." }
+            g.reachedPercent = (j["reached_percent"] as? NSNumber)?.doubleValue ?? 0
+            g.problem = j["problem"] as? String
+            if g.status == "building" { g.problem = "This build didn't finish. Use \(g.isPSP ? "Compile" : "Grow again") to complete it." }
             if g.status == "mismatch" { g.problem = "Some blocks didn't match the interpreter, so this library can't be trusted yet." }
             found.append(g)
         }
@@ -264,7 +298,9 @@ final class Store: ObservableObject {
         queue.removeFirst()
         running = true
         update(id) { $0.queued = false; $0.building = true; $0.done = [] }
-        let args = ["python3", repo + "/tools/genexia_recompile.py", g.romPath, "--imac", imacHost]
+        let args = g.romPath.lowercased().hasSuffix(".iso")
+            ? ["python3", repo + "/tools/psp_game.py", "build", g.romPath]
+            : ["python3", repo + "/tools/genexia_recompile.py", g.romPath, "--imac", imacHost]
         run(args) { [weak self] line in self?.event(id, line) } finished: { [weak self] code in
             guard let self else { return }
             let current = self.games.first { $0.id == id || $0.romPath == g.romPath }?.id ?? id
@@ -377,7 +413,21 @@ final class Store: ObservableObject {
     }
 
     func play(_ game: Game) {
+        if game.isPSP { return playPSP(game) }
         run([repo + "/genexia", "--rom", game.romPath], onLine: { _ in }, finished: { _ in })
+    }
+
+    /// A disc that isn't compiled yet compiles first; press Play again when it's done.
+    private func playPSP(_ game: Game) {
+        guard game.instructions > 0 else { return rebuild(game) }
+        let d = gamesDir.appendingPathComponent(game.id), o = game.options
+        var settings = ["PSP_SCALE": String(o.scale), "PSP_MSAA": String(o.msaa)]
+        if o.window == 2 { settings["PSP_FULLSCREEN"] = "1" }
+        settings["PSP_SIZE"] = o.window == 0 ? "960x544" : "1920x1088"
+        run([d.appendingPathComponent("play_metal").path, "game.elf", game.romPath, "999999"], folder: d, settings: settings,
+            onLine: { _ in }, finished: { [weak self] code in
+                if code != 0 { self?.banner = "\(game.title.capitalized) stopped unexpectedly." }
+            })
     }
 
     func reveal(_ game: Game) {
@@ -472,9 +522,19 @@ final class Store: ObservableObject {
             (packaged.appendingPathComponent("game.state"), "Save state", "From the packaged app", "bookmark.fill"),
             (packaged.appendingPathComponent("battery.srm"), "Cartridge save", "From the packaged app", "memorychip"),
         ]
+        if game.isPSP { return pspSaves(game) }
         return places.compactMap { url, title, detail, icon in
             guard let d = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
             return GameSave(url: url, title: title, detail: detail, icon: icon, date: d)
+        }
+    }
+
+    private func pspSaves(_ game: Game) -> [GameSave] {
+        let root = gamesDir.appendingPathComponent(game.id).appendingPathComponent("saves")
+        let all = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        return all.compactMap { url in
+            guard let d = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
+            return GameSave(url: url, title: "Game save", detail: url.lastPathComponent, icon: "memorychip", date: d)
         }
     }
 
@@ -482,6 +542,7 @@ final class Store: ObservableObject {
     func remove(_ game: Game, saves withSaves: Bool) {
         guard !game.building, !game.queued else { return }
         let fm = FileManager.default
+        if game.isPSP { keepOffShelf(game, saves: !withSaves) }
         let trash = (withSaves ? saves(for: game).map(\.url) : []) + [gamesDir.appendingPathComponent(game.id)]
         for url in trash where fm.fileExists(atPath: url.path) {
             do { try fm.trashItem(at: url, resultingItemURL: nil) } catch {
@@ -497,6 +558,19 @@ final class Store: ObservableObject {
         if selection == game.id { selection = games.first?.id }
     }
 
+    /// Its disc is still in Downloads, so the next look there mustn't bring it back. Saves live
+    /// inside a PSP game's folder, so keeping them means moving them out first.
+    private func keepOffShelf(_ game: Game, saves keep: Bool) {
+        let support = gamesDir.deletingLastPathComponent(), list = support.appendingPathComponent("psp-removed.txt")
+        let earlier = (try? String(contentsOf: list, encoding: .utf8)) ?? ""
+        try? (earlier + game.id + "\n").write(to: list, atomically: true, encoding: .utf8)
+        let saves = gamesDir.appendingPathComponent(game.id).appendingPathComponent("saves")
+        guard keep, FileManager.default.fileExists(atPath: saves.path) else { return }
+        let kept = support.appendingPathComponent("psp-saves")
+        try? FileManager.default.createDirectory(at: kept, withIntermediateDirectories: true)
+        try? FileManager.default.moveItem(at: saves, to: kept.appendingPathComponent(game.id))
+    }
+
     func sendToIMac(_ game: Game) {
         guard let lib = game.os9Library else { return }
         banner = "Sending \(game.title) to the iMac…"
@@ -505,14 +579,14 @@ final class Store: ObservableObject {
         }
     }
 
-    private func run(_ args: [String], onLine: @escaping @MainActor (String) -> Void, finished: @escaping @MainActor (Int32) -> Void) {
+    private func run(_ args: [String], folder: URL? = nil, settings: [String: String] = [:], onLine: @escaping @MainActor (String) -> Void, finished: @escaping @MainActor (Int32) -> Void) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = args
-        p.currentDirectoryURL = URL(fileURLWithPath: repo)
+        p.currentDirectoryURL = folder ?? URL(fileURLWithPath: repo)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        p.environment = env
+        p.environment = env.merging(settings) { $1 }
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
