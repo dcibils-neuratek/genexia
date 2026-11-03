@@ -39,6 +39,7 @@ struct Game: Identifiable, Equatable {
 
     var isN64: Bool { console == "Nintendo 64" }
     var isPSP: Bool { console == "PSP" }
+    var encrypted: Bool { problem?.hasPrefix("This disc's program is encrypted") == true }
 }
 
 let buildSteps: [(id: String, title: String, icon: String)] = [
@@ -213,14 +214,30 @@ final class Store: ObservableObject {
     func findDiscs() {
         guard !findingDiscs else { return }
         findingDiscs = true
-        var found = false
-        run(["python3", repo + "/tools/psp_game.py", "scan"], onLine: { _ in found = true }) { [weak self] _ in
-            self?.findingDiscs = false
-            if found {
-                if self?.games.contains(where: { $0.building || $0.queued }) == false { self?.explorers = [:] }
-                self?.reload()
+        var found: [String] = []
+        run(["python3", repo + "/tools/psp_game.py", "scan"], onLine: { found.append($0) }) { [weak self] _ in
+            guard let self else { return }
+            self.findingDiscs = false
+            guard !found.isEmpty else { return }
+            if !self.games.contains(where: { $0.building || $0.queued }) { self.explorers = [:] }
+            self.reload()
+            for line in found where line.hasPrefix("dumped ") {
+                if let g = self.games.first(where: { $0.id == line.dropFirst(7) }) { self.rebuild(g) }
             }
         }
+    }
+
+    /// Genexia holds no decryption code: PPSSPP dumps the player's own game, and the look for
+    /// discs picks the dump up, soonest when PPSSPP closes.
+    func dumpWithPPSSPP(_ game: Game) {
+        let places = ["/Applications", NSHomeDirectory() + "/Applications"].flatMap { folder in
+            ["PPSSPPSDL", "PPSSPP"].map { "\(folder)/\($0).app/Contents/MacOS/\($0)" }
+        }
+        guard let ppsspp = places.first(where: FileManager.default.isExecutableFile) else {
+            banner = "Dumping needs PPSSPP, which isn't installed."
+            return
+        }
+        run([ppsspp, game.romPath], onLine: { _ in }) { [weak self] _ in self?.findDiscs() }
     }
 
     func checkIMac(_ game: Game) {

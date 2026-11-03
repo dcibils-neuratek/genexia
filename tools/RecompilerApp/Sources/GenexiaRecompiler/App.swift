@@ -264,6 +264,10 @@ struct GameDetail: View {
 
     var compileBar: some View {
         HStack {
+            if game.encrypted {
+                Button { store.dumpWithPPSSPP(game) } label: { Label("Dump with PPSSPP", systemImage: "arrow.down.doc") }
+                    .buttonStyle(.borderedProminent).tint(accent)
+            }
             Button { store.rebuild(game) } label: {
                 Label(!game.isPSP ? "Grow again" : game.instructions > 0 ? "Compile again" : "Compile", systemImage: "arrow.triangle.2.circlepath")
             }

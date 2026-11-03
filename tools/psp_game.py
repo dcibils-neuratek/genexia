@@ -28,8 +28,8 @@ REMOVED = os.path.join(SUPPORT, 'psp-removed.txt')
 SEARCH = [os.path.expanduser('~/Downloads'), os.path.expanduser('~/Desktop')]
 DUMPS = [os.path.expanduser('~/.config/ppsspp/PSP/SYSTEM/DUMP'), os.path.expanduser('~/Downloads')]
 CONSOLE = 'PSP'
-ENCRYPTED = ("This disc's program is encrypted, and Genexia can't read it. In PPSSPP, turn on Dump decrypted EBOOT.BIN "
-             "in the developer tools and start the game once, then press Compile.")
+ENCRYPTED = ("This disc's program is encrypted, and Genexia can't read it. Dump with PPSSPP opens it there: turn on Dump Decrypted "
+             "Eboot in the developer tools and start the game once. Genexia compiles it when the dump appears.")
 
 
 building = None        # (folder, info) of the game being built, so a failure is kept with it
@@ -193,6 +193,11 @@ def scan():
         info = read_info(d)
         if info and info.get('console') == CONSOLE:
             known[info.get('rom')] = name
+            if (info.get('problem') or '').startswith(ENCRYPTED[:32]):
+                info['problem'] = None if dump_of(name) else ENCRYPTED
+                write_info(d, info)
+                if dump_of(name):
+                    print('dumped ' + name)
             elf = os.path.join(d, 'game.elf')
             if info.get('instructions') and info.get('status') == 'ready' and os.path.exists(elf) and not os.path.exists(os.path.join(d, 'map.json')):
                 recompile_stats(elf, os.path.join(d, 'stats.tmp'), d)   # built before there were maps

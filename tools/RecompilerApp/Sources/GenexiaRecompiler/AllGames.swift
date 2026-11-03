@@ -127,11 +127,11 @@ struct AllGames: View {
                 }
                 Text(state(g)).font(.callout).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button { store.play(g) } label: {
-                        Label(g.isPSP && g.instructions == 0 ? "Compile" : "Play", systemImage: "play.fill").labelStyle(.titleAndIcon).font(.system(size: 14, weight: .semibold)).padding(.horizontal, 10).padding(.vertical, 2)
+                    Button { g.encrypted ? store.dumpWithPPSSPP(g) : store.play(g) } label: {
+                        Label(g.encrypted ? "Dump with PPSSPP" : g.isPSP && g.instructions == 0 ? "Compile" : "Play", systemImage: g.encrypted ? "arrow.down.doc" : "play.fill").labelStyle(.titleAndIcon).font(.system(size: 14, weight: .semibold)).padding(.horizontal, 10).padding(.vertical, 2)
                     }
-                    .buttonStyle(.borderedProminent).tint(accent).disabled(g.building || g.problem != nil)
-                    Button { open(g, .compile) } label: { Label("Compile", systemImage: "cpu").labelStyle(.titleAndIcon) }
+                    .buttonStyle(.borderedProminent).tint(accent).disabled(g.building || (g.problem != nil && !g.encrypted))
+                    Button { open(g, .compile) } label: { Label(g.isPSP && g.instructions == 0 ? "Details" : "Compile", systemImage: "cpu").labelStyle(.titleAndIcon) }
                     if !g.isPSP {
                         Menu {
                             ForEach(PackageTarget.allCases) { t in
