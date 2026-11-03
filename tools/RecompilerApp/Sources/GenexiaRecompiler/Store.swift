@@ -23,6 +23,7 @@ struct Game: Identifiable, Equatable {
     var os9Library: String? = nil
     var problem: String? = nil
     var reachedPercent: Double = 0
+    var blocks = 0
 
     // a build in progress
     var building = false
@@ -215,7 +216,10 @@ final class Store: ObservableObject {
         var found = false
         run(["python3", repo + "/tools/psp_game.py", "scan"], onLine: { _ in found = true }) { [weak self] _ in
             self?.findingDiscs = false
-            if found { self?.reload() }
+            if found {
+                if self?.games.contains(where: { $0.building || $0.queued }) == false { self?.explorers = [:] }
+                self?.reload()
+            }
         }
     }
 
@@ -255,6 +259,7 @@ final class Store: ObservableObject {
             g.mismatches = j["mismatches"] as? Int ?? 0
             g.os9Library = j["os9_library"] as? String
             g.reachedPercent = (j["reached_percent"] as? NSNumber)?.doubleValue ?? 0
+            g.blocks = j["blocks"] as? Int ?? 0
             g.problem = j["problem"] as? String
             if g.status == "building" { g.problem = "This build didn't finish. Use \(g.isPSP ? "Compile" : "Grow again") to complete it." }
             if g.status == "mismatch" { g.problem = "Some blocks didn't match the interpreter, so this library can't be trusted yet." }

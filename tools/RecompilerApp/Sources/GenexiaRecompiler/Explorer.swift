@@ -169,6 +169,7 @@ struct ExplorerView: View {
     let building: Bool
     let nativePercent: Double
     let facts: [RomFact]
+    var program = false     // a disc's program, not a whole ROM
     @State private var kick = Date()
 
     let found = Color(red: 0.36, green: 0.72, blue: 1.0)
@@ -178,10 +179,10 @@ struct ExplorerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("ROM map").font(.headline)
+                Text(program ? "Program map" : "ROM map").font(.headline)
                 Spacer()
                 Legend(color: found, label: "Original code")
-                Legend(color: guessedColor, label: "Guessed")
+                if !program { Legend(color: guessedColor, label: "Guessed") }
                 Legend(color: native, label: "Native")
                 Legend(color: .white.opacity(0.1), label: "Data, or not reached")
                 if !building && explorer.hasData {
@@ -195,7 +196,9 @@ struct ExplorerView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Canvas { ctx, size in draw(ctx, size) }.frame(height: 310)
                     HStack {
-                        Text(explorer.hasData ? String(format: "Code found fills %.1f%% of the ROM. Most of the rest is art, sound and levels, which never need compiling.", explorer.percentOfROM) : "Waiting for the first map")
+                        Text(!explorer.hasData ? "Waiting for the first map" : program
+                             ? String(format: "Code found fills %.1f%% of the program. The rest is its data, and the art, sound and levels are elsewhere on the disc.", explorer.percentOfROM)
+                             : String(format: "Code found fills %.1f%% of the ROM. Most of the rest is art, sound and levels, which never need compiling.", explorer.percentOfROM))
                         Spacer()
                     }.font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     if building || explorer.active { VStack(alignment: .leading, spacing: 1) {

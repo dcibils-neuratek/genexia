@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Static recompiler for PSP games (Allegrex: 32-bit MIPS with the VFPU).
 
-    recompile_psp.py PROGRAM OUTDIR [--extra file of hex pcs]
+    recompile_psp.py PROGRAM OUTDIR [--extra file of hex pcs] [--map FILE]
 
 PROGRAM is a decrypted, fixed-address ELF. Code is found by following it from
 the entry point and from every value in the program that could be a code
@@ -11,6 +11,7 @@ src/chips/allegrex.h. VFPU instructions call the VFPU core one at a time.
 The output holds the game's code: it stays out of this repository.
 """
 import collections
+import json
 import os
 import struct
 import sys
@@ -239,6 +240,7 @@ class Recompiler:
         self.blocks = {}
         self.todo = []
         self.covered = set()
+        self.found = []             # (pc, addresses), in the order they were reached
         self.bad = collections.Counter()
 
     def seed(self, pc):
@@ -306,6 +308,32 @@ class Recompiler:
             if lines is not None:
                 self.blocks[pc] = lines
                 self.covered.update(seen)
+                self.found.append((pc, seen))
+
+
+def write_map(path, r):
+    """What was found, in program runs, for the Recompiler's map."""
+    prog = r.prog
+    done, offsets, lengths, edges, ticker = set(), [], [], [], []
+    step = max(1, len(r.found) // 600)
+    for n, (pc, seen) in enumerate(r.found):
+        fresh = [a for a in seen if a not in done]
+        done.update(fresh)
+        if not fresh:
+            continue
+        i = len(offsets)
+        offsets.append(fresh[0] - prog.base)
+        lengths.append(4 * len(fresh))
+        last = seen[-2] if len(seen) > 1 else seen[-1]
+        br = branch_of(last, prog.word(last))
+        if br and 't' in br and prog.inside(br['t']):
+            edges.append([i, fresh[0] - prog.base, br['t'] - prog.base])
+        if n % step == 0:
+            first = r.blocks[pc][0].strip() if r.blocks[pc] else ''
+            ticker.append([i, '%08X' % pc, '%08X' % prog.word(pc), first[:44]])
+    edges = edges[::max(1, len(edges) // 2500)]
+    with open(path, 'w') as f:
+        json.dump({'size': len(prog.words) * 4, 'followed': len(offsets), 'offsets': offsets, 'lengths': lengths, 'edges': edges, 'ticker': ticker}, f, separators=(',', ':'))
 
 
 def main():
@@ -356,6 +384,8 @@ def main():
         for pc, (mod, nid) in sorted(prog.imports.items()):
             f.write('    psp_import_add(0x%08Xu, "%s", 0x%08Xu);\n' % (pc, mod, nid))
         f.write('}\n')
+    if '--map' in a:
+        write_map(a[a.index('--map') + 1], r)
     total = len(prog.words)
     print('entry %08X, %d words, %d imports' % (prog.entry, total, len(prog.imports)))
     print('%d blocks, %d instructions reached (%.1f%% of the program, the rest is data or unreached)' % (

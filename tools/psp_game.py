@@ -157,8 +157,9 @@ def removed():
         return set()
 
 
-def recompile_stats(elf, out):
-    r = subprocess.run([sys.executable, os.path.join(REPO, 'tools/recompile_psp.py'), elf, out], capture_output=True, text=True)
+def recompile_stats(elf, out, d):
+    r = subprocess.run([sys.executable, os.path.join(REPO, 'tools/recompile_psp.py'), elf, out, '--map', os.path.join(d, 'map.json')],
+                       capture_output=True, text=True)
     m = re.search(r'(\d+) blocks, (\d+) instructions reached \(([\d.]+)%', r.stdout + r.stderr)
     return (int(m.group(1)), int(m.group(2)), float(m.group(3))) if m else None
 
@@ -186,12 +187,18 @@ def boot_program(disc, disc_id):
 
 def scan():
     known = {}
+    new = 0
     for name in os.listdir(GAMES) if os.path.isdir(GAMES) else []:
-        info = read_info(os.path.join(GAMES, name))
+        d = os.path.join(GAMES, name)
+        info = read_info(d)
         if info and info.get('console') == CONSOLE:
             known[info.get('rom')] = name
+            elf = os.path.join(d, 'game.elf')
+            if info.get('instructions') and info.get('status') == 'ready' and os.path.exists(elf) and not os.path.exists(os.path.join(d, 'map.json')):
+                recompile_stats(elf, os.path.join(d, 'stats.tmp'), d)   # built before there were maps
+                shutil.rmtree(os.path.join(d, 'stats.tmp'), ignore_errors=True)
+                new += 1
     gone = removed()
-    new = 0
     discs = []
     for top in SEARCH:
         base = top.count(os.sep)
@@ -217,7 +224,7 @@ def scan():
         info.update(rom=path, console=CONSOLE, title=title.upper(), id=disc_id, supported=True, problem=None if readable else ENCRYPTED)
         info.setdefault('status', 'ready')
         if not info.get('instructions') and os.path.exists(os.path.join(d, 'play_metal')) and os.path.exists(elf):
-            stats = recompile_stats(elf, os.path.join(d, 'stats.tmp'))
+            stats = recompile_stats(elf, os.path.join(d, 'stats.tmp'), d)
             shutil.rmtree(os.path.join(d, 'stats.tmp'), ignore_errors=True)
             if stats:
                 info.update(blocks=stats[0], instructions=stats[1], reached_percent=stats[2])
@@ -324,9 +331,10 @@ def build(path):
     elf = extract_program(disc, d, disc_id)
     step('discover', 'Finding the code in the program')
     shutil.rmtree(os.path.join(d, 'code'), ignore_errors=True)
-    stats = recompile_stats(elf, os.path.join(d, 'code'))
+    stats = recompile_stats(elf, os.path.join(d, 'code'), d)
     if not stats:
         fail('The recompiler stopped on this program.')
+    say(event='map', path=os.path.join(d, 'map.json'))
     say(event='stats', instructions=stats[1])
     info.update(blocks=stats[0], instructions=stats[1], reached_percent=stats[2])
 

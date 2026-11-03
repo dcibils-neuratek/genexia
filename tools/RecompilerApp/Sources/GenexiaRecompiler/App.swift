@@ -228,11 +228,21 @@ struct GameDetail: View {
                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         }
-        if game.isPSP { PSPStatus(game: game) } else { nativeCards }
+        if game.isPSP { pspCards } else { nativeCards }
         if !game.log.isEmpty {
             Text(game.log.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                 .padding(10).background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    @ViewBuilder var pspCards: some View {
+        PSPStatus(game: game)
+        ExplorerView(explorer: store.explorer(for: game.id), building: game.building, nativePercent: game.reachedPercent, facts: store.facts(for: game), program: true)
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+            Stat(value: game.blocks == 0 ? "–" : game.blocks.formatted(), label: "blocks of native code")
+            Stat(value: game.instructions == 0 ? "–" : game.instructions.formatted(), label: "instructions compiled")
+            Stat(value: size(game.libraryBytes), label: "Mac program")
         }
     }
 
