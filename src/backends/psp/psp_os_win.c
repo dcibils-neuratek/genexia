@@ -4,6 +4,7 @@
 #include <direct.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include <stdio.h>
 #include "psp_os.h"
 
 static wchar_t *wide(const char *s, wchar_t *out, int room) {
@@ -27,3 +28,18 @@ int psp_replace(const char *from, const char *to) {
 }
 
 int psp_setenv(const char *name, const char *value) { return getenv(name) ? 0 : _putenv_s(name, value); }
+
+int psp_each_file(const char *dir, int (*fn)(const char *path, void *ctx), void *ctx) {
+    wchar_t pattern[1024]; WIN32_FIND_DATAW e; char name[1024], path[2048]; int r = 0;
+    wide(dir, pattern, 1000);
+    wcscat(pattern, L"*");
+    HANDLE h = FindFirstFileW(pattern, &e);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!WideCharToMultiByte(CP_UTF8, 0, e.cFileName, -1, name, sizeof name, NULL, NULL)) continue;
+        snprintf(path, sizeof path, "%s%s", dir, name);
+        r = fn(path, ctx);
+    } while (!r && FindNextFileW(h, &e));
+    FindClose(h);
+    return r;
+}

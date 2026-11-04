@@ -119,9 +119,9 @@ enum PackageTarget: String, CaseIterable, Identifiable {
         case .ppc: return [("runtime", "Build the Mac OS 9 emulators", "cpu"), ("disk", "Write the disk", "opticaldisc")]
         case .psp: return [("compile", "Compile the game and chips for PSP", "hammer"), ("assemble", "Put the folder together", "shippingbox")]
         case .windows: return [("compile", "Compile the game for Windows", "hammer"), ("runtime", "Build the player", "cpu"), ("icon", "Make the icon", "photo"),
-                               ("assemble", "Put the folder together", "shippingbox"), ("disc", "Copy the disc", "opticaldisc")]
+                               ("assemble", "Put the folder together", "shippingbox")]
         case .linux: return [("compile", "Compile the game for Linux", "hammer"), ("runtime", "Build the player", "cpu"),
-                             ("assemble", "Put the folder together", "shippingbox"), ("disc", "Copy the disc", "opticaldisc")]
+                             ("assemble", "Put the folder together", "shippingbox")]
         }
     }
 }

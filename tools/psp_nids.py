@@ -4,7 +4,9 @@ import hashlib
 import struct
 import sys
 
-NAMES = '''sceMpegQueryStreamOffset sceMpegQueryStreamSize sceMpegQueryMemSize sceMpegCreate sceMpegRegistStream sceMpegMallocAvcEsBuf
+NAMES = '''sceKernelIsCpuIntrEnable sceKernelIsCpuIntrSuspended sceKernelMemset sceKernelMemcpy sceUmdWaitDriveStatWithTimer
+sceGeEdramSetAddrTranslation sceKernelSetCompiledSdkVersion603_605
+sceMpegQueryStreamOffset sceMpegQueryStreamSize sceMpegQueryMemSize sceMpegCreate sceMpegRegistStream sceMpegMallocAvcEsBuf
 sceMpegQueryAtracEsSize sceMpegInitAu sceMpegGetAvcAu sceMpegGetAtracAu sceMpegAtracDecode sceMpegRingbufferQueryMemSize
 sceMpegRingbufferConstruct sceMpegRingbufferAvailableSize sceMpegRingbufferPut sceMpegAvcDecode sceMpegFinish sceMpegDelete
 sceMpegRingbufferDestruct sceMpegUnRegistStream sceMpegFlushAllStream sceMpegFreeAvcEsBuf sceMpegAvcDecodeMode sceMpegAvcDecodeStop
@@ -54,8 +56,13 @@ __sceSasGetEndFlag __sceSasSetVolume __sceSasSetKeyOn __sceSasSetKeyOff __sceSas
 sceAtracGetNextSample sceAtracGetMaxSample sceUtilityOskInitStart sceUtilityOskGetStatus sceUtilityOskUpdate sceUtilityOskShutdownStart sceUtilitySetSystemParamInt sceAtracDecodeData sceAtracReleaseAtracID sceAtracSetDataAndGetID sceAtracAddStreamData sceAtracSetLoopNum sceAtracGetRemainFrame sceAtracGetStreamDataInfo
 sceIoIoctl sceIoIoctlAsync sceKernelUtilsMt19937Init sceKernelUtilsMt19937UInt sceCtrlSetIdleCancelThreshold sceKernelSetVTimerTime sceKernelGetVTimerTime sceKernelGetThreadExitStatus sceKernelSignalSema sceKernelTryLockMutex sceKernelRotateThreadReadyQueue sceKernelDeleteCallback sceKernelNotifyCallback sceKernelCreateMsgPipe sceKernelTrySendMsgPipe sceKernelSendMsgPipe sceKernelReceiveMsgPipe sceKernelCreateMbx sceKernelSendMbx sceKernelReceiveMbx sceKernelPollMbx sceKernelCreateFpl sceKernelAllocateFpl sceKernelTryAllocateFpl sceKernelFreeFpl sceKernelCreateVpl sceKernelAllocateVpl sceKernelTryAllocateVpl sceKernelFreeVpl sceKernelDeleteVpl sceKernelDeleteFpl sceKernelCheckCallback sceKernelReferThreadStatus sceKernelLockMutex sceKernelUnlockMutex sceKernelCreateMutex sceKernelDeleteMutex'''.split()
 
+# later firmware gave some functions NIDs that are not the hash of their name
+ALIASES = {0x469989AD: 'scePowerSetClockFrequency', 0x1B4217BC: 'sceKernelSetCompiledSdkVersion603_605'}
+
 with open(sys.argv[1], 'w') as f:
     f.write('static const struct { unsigned nid; const char *name; } psp_names[] = {\n')
     for n in NAMES:
         f.write('    {0x%08Xu, "%s"},\n' % (struct.unpack('<I', hashlib.sha1(n.encode()).digest()[:4])[0], n))
+    for nid, n in ALIASES.items():
+        f.write('    {0x%08Xu, "%s"},\n' % (nid, n))
     f.write('};\n')

@@ -13,6 +13,8 @@ int psp_mkdir(const char *path);
 int psp_chdir(const char *path);
 int psp_replace(const char *from, const char *to);  /* rename, over an existing file too */
 int psp_setenv(const char *name, const char *value);
+/* calls fn with each file in dir (which ends in a slash) until it returns nonzero */
+int psp_each_file(const char *dir, int (*fn)(const char *path, void *ctx), void *ctx);
 #else
 #include <sys/mman.h>
 #include <unistd.h>
@@ -26,5 +28,14 @@ static inline int psp_mkdir(const char *path) { return mkdir(path, 0755); }
 #define psp_chdir chdir
 #define psp_replace rename
 static inline int psp_setenv(const char *name, const char *value) { return setenv(name, value, 0); }
+#include <dirent.h>
+static inline int psp_each_file(const char *dir, int (*fn)(const char *path, void *ctx), void *ctx) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    const struct dirent *e; char path[2048]; int r = 0;
+    while (!r && (e = readdir(d))) { snprintf(path, sizeof path, "%s%s", dir, e->d_name); r = fn(path, ctx); }
+    closedir(d);
+    return r;
+}
 #endif
 #endif

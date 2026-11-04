@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <strings.h>
 #include <stdlib.h>
 #include "psp_os.h"
 #include <time.h>
@@ -106,8 +107,12 @@ static int new_thread(const char *name, u32 entry, int prio, u32 stack) {
 #include "psp_codec.c"
 #include "psp_save.c"
 
+static struct { int on; char id[64]; u32 crc; char dirs[2][1024]; } packaged;  /* see window_packaged */
+
 #ifdef PSP_WINDOW
 #include "psp_window.c"
+#else
+static void alert(const char *message) { puts(message); }
 #endif
 
 #define PUT_RETURN 0x08000020u
@@ -161,6 +166,7 @@ static void io_wait(u32 bytes) {
 
 /* --------------------------------------------------- semaphores and flags */
 static struct { int used, count, max; } sema[256];
+static int sema_ok(u32 id) { return (id & ~255u) == 0x3000 && (id & 255) && sema[id & 255].used; }
 static struct { int used; u32 bits; } flag[256];
 static void wake_sema(int s) {
     for (int i = 0; i < MAX_THREADS; i++)
@@ -282,6 +288,9 @@ static void hle(int i) {
     else if (IS("sceKernelCpuSuspendIntr")) { RET(!intr_off); intr_off = 1; }
     else if (IS("sceKernelCpuResumeIntr") || IS("sceKernelCpuResumeIntrWithSync")) intr_off = !A0;
     else if (IS("sceKernelIsCpuIntrEnable")) RET(!intr_off);
+    else if (IS("sceKernelIsCpuIntrSuspended")) RET(A0 == 0);         /* given what sceKernelCpuSuspendIntr returned */
+    else if (IS("sceKernelMemset")) { memset(M(A0), (int)(A1 & 0xFF), A2); RET(A0); }
+    else if (IS("sceKernelMemcpy")) { memmove(M(A0), M(A1), A2); RET(A0); }
     else if (IS("sceKernelGetThreadId")) RET(UID(cur));
     else if (IS("sceKernelSysClock2USec")) { const u64 c = (u64)RD32(A0 + 4) << 32 | RD32(A0); if (A1) WR32(A1, (u32)(c / 1000000)); if (A2) WR32(A2, (u32)(c % 1000000)); }
     else if (IS("sceKernelSysClock2USecWide")) { const u64 c = (u64)A1 << 32 | A0; if (A2) WR32(A2, (u32)(c / 1000000)); if (A3) WR32(A3, (u32)(c % 1000000)); }
@@ -296,7 +305,17 @@ static void hle(int i) {
     else if (IS("sceKernelCancelWakeupThread")) { const int t = A0 ? TID(A0) : cur; if (t >= 0 && t < MAX_THREADS) { RET(th[t].wakeups); th[t].wakeups = 0; } }
     else if (IS("sceKernelWaitThreadEnd") || IS("sceKernelWaitThreadEndCB")) { const int t = TID(A0); if (t >= 0 && t < MAX_THREADS && th[t].state != DONE && th[t].state != FREE) wait_for(WAIT_END, t, 0, 0, 0); }
     else if (IS("sceKernelCreateSema")) { for (int s = 1; s < 256; s++) if (!sema[s].used) { sema[s].used = 1; sema[s].count = (int)A2; sema[s].max = (int)A3; RET(0x3000 + s); return; } RET(0x80020064u); }
-    else if (IS("sceKernelDeleteSema")) sema[A0 & 255].used = 0;
+    else if ((IS("sceKernelDeleteSema") || IS("sceKernelSignalSema") || IS("sceKernelPollSema") || IS("sceKernelWaitSema")
+              || IS("sceKernelWaitSemaCB")) && !sema_ok(A0)) {
+        fprintf(lg, "%s on unknown semaphore %08X ra %08X\n", n, A0, p.r[31]);
+        RET(0x80020199u);                               /* SCE_KERNEL_ERROR_UNKNOWN_SEMID, as the PSP answers */
+    }
+    else if (IS("sceKernelDeleteSema")) {               /* whoever waits on it wakes with an error */
+        const int s = A0 & 255;
+        sema[s].used = 0;
+        for (int i = 0; i < MAX_THREADS; i++)
+            if (th[i].state == WAIT_SEMA && th[i].id == s) { th[i].state = READY; th[i].timed = 0; th[i].cpu.r[2] = 0x800201B5u; }
+    }
     else if (IS("sceKernelSignalSema")) { const int s = A0 & 255; sema[s].count += (int)A1; wake_sema(s); }
     else if (IS("sceKernelPollSema")) { const int s = A0 & 255; if (sema[s].count >= (int)A1) sema[s].count -= (int)A1; else RET(0x800201A4u); }
     else if (IS("sceKernelWaitSema") || IS("sceKernelWaitSemaCB")) {
@@ -520,6 +539,200 @@ static void hle(int i) {
     else if (IS("sceKernelExitGame")) stop_reason = "the game exited";
 }
 
+/* ------------------------------------------------- the program, as the PSP loads it */
+static u32 rd32(const u8 *b) { u32 v; memcpy(&v, b, 4); return v; }
+static u16 rd16(const u8 *b) { u16 v; memcpy(&v, b, 2); return v; }
+
+static u32 crc32_of(const u8 *b, u32 n) {
+    u32 c = 0xFFFFFFFFu;
+    while (n--) { c ^= *b++; for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & -(c & 1)); }
+    return ~c;
+}
+
+/* An ELF goes where it says. A PRX, which early games use, is placed where the
+ * PSP's loader would put it, with its addresses fixed up for that. Gives the entry,
+ * the bytes loaded (start, count: what the code was recompiled from) and the end. */
+#define PRX_BASE 0x08804000u
+static int program_load(const u8 *d, u32 n, u32 *entry, u32 *start, u32 *count, u32 *end) {
+    if (n < 52 || memcmp(d, "\x7f" "ELF", 4)) return 0;
+    const u32 phoff = rd32(d + 28), shoff = rd32(d + 32);
+    const u16 type = rd16(d + 16), phnum = rd16(d + 44), shnum = rd16(d + 48);
+    if (type != 0xFFA0) {
+        if (phoff + 32 > n) return 0;
+        const u8 *ph = d + phoff;
+        const u32 off = rd32(ph + 4), va = rd32(ph + 8), fsz = rd32(ph + 16), msz = rd32(ph + 20);
+        if (off + fsz > n || fsz > msz || va < 0x08800000u || va + msz > 0x0A000000u) return 0;
+        memset(M(va), 0, msz);
+        memcpy(M(va), d + off, fsz);
+        *entry = rd32(d + 24); *start = va; *count = fsz; *end = va + msz;
+        return 1;
+    }
+    if (!phnum || phnum > 8 || phoff + phnum * 32u > n) return 0;
+    u32 vaddr[8], loaded = 0, size = 0;
+    for (int i = 0; i < phnum; i++) {
+        const u8 *ph = d + phoff + i * 32;
+        const u32 off = rd32(ph + 4), fsz = rd32(ph + 16), msz = rd32(ph + 20);
+        vaddr[i] = rd32(ph + 8);
+        if (off + fsz > n || vaddr[i] + msz > 0x01000000u) return 0;
+        if (vaddr[i] + fsz > loaded) loaded = vaddr[i] + fsz;
+        if (vaddr[i] + msz > size) size = vaddr[i] + msz;
+    }
+    memset(M(PRX_BASE), 0, size);
+    for (int i = 0; i < phnum; i++) {
+        const u8 *ph = d + phoff + i * 32;
+        memcpy(M(PRX_BASE + vaddr[i]), d + rd32(ph + 4), rd32(ph + 16));
+    }
+    for (int i = 0; i < shnum && shoff + (i + 1) * 40u <= n; i++) {
+        const u8 *sh = d + shoff + i * 40;
+        if (rd32(sh + 4) != 0x700000A0u) continue;
+        const u32 at0 = rd32(sh + 16), len = rd32(sh + 20) / 8;
+        if (at0 + len * 8 > n) return 0;
+        const u8 *rel = d + at0;
+        for (u32 r = 0; r < len; r++) {
+            const u32 offset = rd32(rel + r * 8), info = rd32(rel + r * 8 + 4);
+            const u32 kind = info & 0xFF, from = info >> 8 & 0xFF, to_seg = info >> 16 & 0xFF;
+            if (from >= phnum || to_seg >= phnum || vaddr[from] + offset + 4 > size) continue;
+            u8 *w = M(PRX_BASE + vaddr[from] + offset);
+            u32 op = rd32(w);
+            const u32 to = PRX_BASE + vaddr[to_seg];
+            if (kind == 2) op += to;                                                        /* R_32 */
+            else if (kind == 4) op = (op & 0xFC000000u) | ((((op & 0x03FFFFFFu) << 2) + to) >> 2 & 0x03FFFFFFu);
+            else if (kind == 5) {                       /* R_HI16: the carry comes from the LO16 that follows */
+                s32 lo = 0;
+                for (u32 later = r + 1; later < len && later <= r + 63; later++) {
+                    const u32 li = rd32(rel + later * 8 + 4);
+                    if ((li & 0xFF) != 6) continue;
+                    const u32 lf = li >> 8 & 0xFF;
+                    if (lf < phnum) lo = (s16)(rd32(M(PRX_BASE + vaddr[lf] + rd32(rel + later * 8))) & 0xFFFF);
+                    break;
+                }
+                const u32 full = ((op & 0xFFFF) << 16) + (u32)lo + to;
+                op = (op & 0xFFFF0000u) | ((full + 0x8000) >> 16 & 0xFFFF);
+            }
+            else if (kind == 6) op = (op & 0xFFFF0000u) | ((op + to) & 0xFFFF);           /* R_LO16 */
+            else continue;
+            memcpy(w, &op, 4);
+        }
+    }
+    *entry = PRX_BASE + rd32(d + 24); *start = PRX_BASE; *count = loaded; *end = PRX_BASE + size;
+    return 1;
+}
+
+static u8 *file_all(FILE *f, u32 *n) {
+    fseek(f, 0, SEEK_END);
+    const long size = ftell(f);
+    if (size <= 0 || size > 64 << 20) return NULL;
+    u8 *b = malloc((size_t)size);
+    fseek(f, 0, SEEK_SET);
+    if (fread(b, 1, (size_t)size, f) != (size_t)size) { free(b); return NULL; }
+    *n = (u32)size;
+    return b;
+}
+
+static u8 *disc_file(const char *path, u32 *n) {
+    u32 lba, size;
+    if (!iso_find(path, &lba, &size) || !size || size > 64 << 20) return NULL;
+    u8 *b = malloc(size);
+    fseek(iso, (long)lba * 2048, SEEK_SET);
+    if (fread(b, 1, size, iso) != size) { free(b); return NULL; }
+    *n = size;
+    return b;
+}
+
+/* the disc's ID, as PARAM.SFO gives it: ULUS10007 */
+static int disc_id(char out[16]) {
+    u32 n = 0; u8 *s = disc_file("PSP_GAME/PARAM.SFO", &n);
+    int found = 0;
+    if (s && n >= 20 && !memcmp(s, "\0PSF", 4)) {
+        const u32 keys = rd32(s + 8), data = rd32(s + 12), count = rd32(s + 16);
+        for (u32 i = 0; i < count && 20 + (i + 1) * 16 <= n && !found; i++) {
+            const u8 *e = s + 20 + i * 16;
+            const u32 key = keys + rd16(e), at = data + rd32(e + 12), len = rd32(e + 4);
+            if (key + 8 <= n && !memcmp(s + key, "DISC_ID", 8) && at + len <= n && len > 1 && len < 16) {
+                memcpy(out, s + at, len); out[len] = 0; found = 1;
+            }
+        }
+    }
+    free(s);
+    return found;
+}
+
+/* A packaged game: the user's disc, found beside the player by its ID, and the program
+ * on it, which must be the one the code was recompiled from. */
+static struct { u32 entry, start, count, end; int wrong_version, needs_dump; char version_disc[1100]; } found;
+static const char *file_name(const char *path) {
+    const char *n = strrchr(path, '/');
+#ifdef _WIN32
+    if (strrchr(path, '\\') > n) n = strrchr(path, '\\');
+#endif
+    return n ? n + 1 : path;
+}
+
+/* a dump of the program the user made from their copy, under any name, known by its checksum */
+static int dump_try(const char *path, void *unused) {
+    (void)unused;
+    const size_t l = strlen(path);
+    if (l < 4 || strcasecmp(path + l - 4, ".bin") && strcasecmp(path + l - 4, ".elf")) return 0;
+    FILE *f = psp_fopen(path, "rb");
+    if (!f) return 0;
+    u32 n = 0; u8 *prog = file_all(f, &n);
+    fclose(f);
+    int ok = prog && program_load(prog, n, &found.entry, &found.start, &found.count, &found.end)
+             && (!packaged.crc || crc32_of(M(found.start), found.count) == packaged.crc);
+    free(prog);
+    return ok;
+}
+
+static int packaged_try(const char *path, void *unused) {
+    (void)unused;
+    const size_t l = strlen(path);
+    if (l < 4 || strcasecmp(path + l - 4, ".iso")) return 0;
+    iso = psp_fopen(path, "rb");
+    if (!iso) return 0;
+    char id[16];
+    if (disc_id(id) && !strcmp(id, packaged.id)) {
+        u32 n = 0; u8 *prog = disc_file("PSP_GAME/SYSDIR/BOOT.BIN", &n);
+        if (!prog || n < 4 || memcmp(prog, "\x7f" "ELF", 4)) {                  /* encrypted: the user's own dump beside it */
+            free(prog); prog = NULL;
+            char dir[1100]; snprintf(dir, sizeof dir, "%s", path);
+            char *slash = strrchr(dir, '/');
+#ifdef _WIN32
+            if (strrchr(dir, '\\') > slash) slash = strrchr(dir, '\\');
+#endif
+            if (slash) slash[1] = 0; else dir[0] = 0;
+            if (dir[0] && psp_each_file(dir, dump_try, NULL)) return 1;
+            found.needs_dump = 1;
+            snprintf(found.version_disc, sizeof found.version_disc, "%s", file_name(path));
+            fclose(iso); iso = NULL;
+            return 0;
+        }
+        int ok = prog && program_load(prog, n, &found.entry, &found.start, &found.count, &found.end);
+        free(prog);
+        if (ok && (!packaged.crc || crc32_of(M(found.start), found.count) == packaged.crc)) return 1;
+        found.wrong_version = 1;
+        snprintf(found.version_disc, sizeof found.version_disc, "%s", file_name(path));
+    }
+    fclose(iso); iso = NULL;
+    return 0;
+}
+
+static int packaged_start(u32 *entry, u32 *end) {
+    for (int i = 0; i < 2; i++)
+        if (packaged.dirs[i][0] && psp_each_file(packaged.dirs[i], packaged_try, NULL)) { *entry = found.entry; *end = found.end; return 1; }
+    char message[2600];
+    if (found.needs_dump)
+        snprintf(message, sizeof message, "The disc %s holds its program encrypted.\n\nPut the decrypted program you dumped from it "
+                 "(PPSSPP's %s_EBOOT.BIN, any name ending in .bin or .elf) in the same folder.", found.version_disc, packaged.id);
+    else if (found.wrong_version)
+        snprintf(message, sizeof message, "The disc %s is %s, but not the release this was made from. "
+                 "Use the same release of the disc Genexia recompiled.", found.version_disc, packaged.id);
+    else
+        snprintf(message, sizeof message, "Put your copy of the game's disc, as an .iso file (%s), in this folder:\n\n%s",
+                 packaged.id, packaged.dirs[1][0] ? packaged.dirs[1] : packaged.dirs[0]);
+    alert(message);
+    return 0;
+}
+
 int main(int argc, char **argv) {
 #ifdef PSP_WINDOW
     if (argc < 3) window_packaged(&argc, &argv);        /* a packaged game: everything beside the player */
@@ -534,18 +747,19 @@ int main(int argc, char **argv) {
     next_vblank_at = vblank_us;
     blocks = calloc(CODE_SLOTS, sizeof *blocks);
     import_of = calloc(CODE_SLOTS, sizeof *import_of);
-    iso = psp_fopen(argv[2], "rb");
-    FILE *f = psp_fopen(argv[1], "rb");
-    if (!f || !iso) { puts("can't open the program or the disc"); return 1; }
-    static u8 h[0x1000];
-    fread(h, 1, sizeof h, f);
-    u32 entry, ph, off, va, fsz, msz;
-    memcpy(&entry, h + 24, 4); memcpy(&ph, h + 28, 4);
-    memcpy(&off, h + ph + 4, 4); memcpy(&va, h + ph + 8, 4); memcpy(&fsz, h + ph + 16, 4); memcpy(&msz, h + ph + 20, 4);
-    fseek(f, off, SEEK_SET);
-    fread(M(va), 1, fsz, f);
-    fclose(f);
-    heap = (va + msz + 0xFFF) & ~0xFFFu;
+    u32 entry = 0, end = 0;
+    if (packaged.on) {
+        if (!packaged_start(&entry, &end)) return 1;
+    } else {
+        iso = psp_fopen(argv[2], "rb");
+        FILE *f = psp_fopen(argv[1], "rb");
+        if (!f || !iso) { puts("can't open the program or the disc"); return 1; }
+        u32 n = 0, start, count; u8 *prog = file_all(f, &n);
+        fclose(f);
+        if (!prog || !program_load(prog, n, &entry, &start, &count, &end)) { puts("not a program the player can load"); return 1; }
+        free(prog);
+    }
+    heap = (end + 0xFFF) & ~0xFFFu;
     psp_register_game();
 #ifdef _WIN32
     lg = stdout;

@@ -40,32 +40,43 @@ static u8 stick(SDL_GameControllerAxis axis) {
 
 static void window_sound(void *unused, Uint8 *out, int bytes) { audio_drain((s16 *)out, bytes / 4); }
 
-/* A packaged game holds game.elf, game.iso and game.txt beside the player. game.txt
- * names the game ("id ULUS10007") and its settings ("PSP_SCALE 4"); saves go to the
- * user's own folder for it, where the system lets a program write. */
+/* A packaged game holds the player, its recompiled code and game.txt, never the game
+ * itself: the player reads the program and everything else from the user's own disc,
+ * an .iso put beside it. game.txt names the game ("id ULUS10007"), the program the
+ * code was made from ("crc 1A2B3C4D") and its settings ("PSP_SCALE 4"). Saves go to
+ * the user's own folder for the game, where the system lets a program write. */
 static void window_packaged(int *argc, char ***argv) {
     char *base = SDL_GetBasePath();
     if (!base) return;
-    static char elf[1024], iso[1024], txt[1024], id[64] = "game";
-    static char *args[4];
-    snprintf(elf, sizeof elf, "%sgame.elf", base);
-    snprintf(iso, sizeof iso, "%sgame.iso", base);
+    char txt[1100];
+    snprintf(packaged.dirs[0], sizeof packaged.dirs[0], "%s", base);
     snprintf(txt, sizeof txt, "%sgame.txt", base);
+    char *app = strstr(packaged.dirs[0], ".app/Contents/Resources/");     /* a Mac app: beside the app */
+    if (app) {
+        snprintf(packaged.dirs[1], sizeof packaged.dirs[1], "%.*s", (int)(app - packaged.dirs[0]), packaged.dirs[0]);
+        char *slash = strrchr(packaged.dirs[1], '/');
+        if (slash) slash[1] = 0;
+    }
     SDL_free(base);
     FILE *f = psp_fopen(txt, "r");
     if (!f) return;
     char line[256], k[64], v[160];
     while (fgets(line, sizeof line, f))
         if (sscanf(line, "%63s %159[^\r\n]", k, v) == 2) {
-            if (!strcmp(k, "id")) snprintf(id, sizeof id, "%s", v);
+            if (!strcmp(k, "id")) snprintf(packaged.id, sizeof packaged.id, "%s", v);
+            else if (!strcmp(k, "crc")) packaged.crc = (u32)strtoul(v, NULL, 16);
             else psp_setenv(k, v);                      /* the player's own settings still win */
         }
     fclose(f);
-    char *saves = SDL_GetPrefPath("Genexia Games", id);
+    char *saves = SDL_GetPrefPath("Genexia Games", packaged.id[0] ? packaged.id : "game");
     if (saves) { psp_chdir(saves); SDL_free(saves); }
-    args[0] = (*argv)[0]; args[1] = elf; args[2] = iso; args[3] = "999999";
+    static char *args[4];
+    packaged.on = 1;
+    args[0] = (*argv)[0]; args[1] = "-"; args[2] = "-"; args[3] = "999999";
     *argc = 4; *argv = args;
 }
+
+static void alert(const char *message) { SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Genexia", message, win); }
 
 static void window_open(const char *title) {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO);

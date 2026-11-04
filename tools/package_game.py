@@ -8,9 +8,10 @@ library, its options and SDL, so it runs with neither Genexia nor this project
 around. It contains the ROM: it is for your own use, and it lands outside the
 repository so it can't be committed.
 
-arm and intel make a Mac app; a PSP game packages for arm, with its disc
-and the Homebrew libraries its player uses inside, or as a folder for x86-64
-windows or linux, built with zig and drawn with OpenGL. ppc makes an HFS disk image for Mac OS 9 holding
+arm and intel make a Mac app; a PSP game packages for arm, with the Homebrew
+libraries its player uses inside, or as a folder for x86-64 windows or linux,
+built with zig and drawn with OpenGL. A PSP package holds no part of the disc:
+the player reads the user's own .iso, put beside it. ppc makes an HFS disk image for Mac OS 9 holding
 the app, library and ROM side by side. Prints one line of JSON per event, like
 genexia_recompile.py.
 """
@@ -305,13 +306,34 @@ def bundle_dylibs(exe, frameworks):
         must(['install_name_tool', '-id', '@loader_path/libSDL3.dylib', sdl3])
 
 
-PSP_LAUNCH = '''#!/bin/sh
-# saves go where the app can write, not inside it
-here="$(cd "$(dirname "$0")" && pwd)"
-res="$here/../Resources"
-mkdir -p "$HOME/Library/Application Support/Genexia Games/%s" && cd "$HOME/Library/Application Support/Genexia Games/%s" || exit 1
-%sexec "$here/play_metal" "$res/game.elf" "$res/game.iso" 999999
-'''
+def psp_game_txt(game, d):
+    """game.txt: which disc the player looks for, the program it must hold, and the settings.
+    A package carries neither: the user puts their own disc beside it."""
+    with open(os.path.join(d, 'game.elf'), 'rb') as f:
+        elf = f.read()
+    ph = struct.unpack_from('<I', elf, 28)[0]
+    off, _, _, size = struct.unpack_from('<4I', elf, ph + 4)
+    crc = zlib.crc32(elf[off:off + size])
+    return f'id {game}\ncrc {crc:08X}\n' + ''.join(f'{k} {v}\n' for k, v in psp_settings(d).items())
+
+
+PSP_README = """{name}
+
+Put your own copy of the game's disc beside this, as an .iso file: disc {game}.
+Any file name works. The player finds the disc by its ID and checks that it is the
+same release Genexia recompiled. Saves are kept in your user folder, not here.
+"""
+
+
+def psp_dump_note(game, rom):
+    """For a disc whose program is encrypted: the user's own decrypted dump goes beside it too."""
+    sys.path.insert(0, os.path.join(REPO, 'tools'))
+    import psp_game
+    boot = psp_game.Disc(rom).read('PSP_GAME/SYSDIR/BOOT.BIN')
+    if boot and boot[:4] == b'\x7fELF':
+        return ''
+    return (f"\nThis disc's program is encrypted. Put the decrypted copy you dumped from it beside\n"
+            f"the disc as well: PPSSPP's {game}_EBOOT.BIN, under any name ending in .bin or .elf.\n")
 
 
 def psp_settings(d):
@@ -395,8 +417,8 @@ def windows_icon(png_path, ico, work):
 
 
 def package_psp_pc(info, game, name, out, d, system):
-    """A folder for Windows or Linux on x86-64: the OpenGL player, the game's program,
-    its disc, game.txt with its settings, and FFmpeg. Linux uses the system's SDL2."""
+    """A folder for Windows or Linux on x86-64: the OpenGL player with the game's recompiled
+    code, game.txt and FFmpeg. The user's disc goes beside it. Linux uses the system's SDL2."""
     t = PC[system]
     z = zig()
     ffmpeg = os.path.join(TOOLCHAINS, t['ffmpeg'])
@@ -463,11 +485,10 @@ def package_psp_pc(info, game, name, out, d, system):
         for n in t['libs']:
             shutil.copy(os.path.join(lib_from, n), os.path.join(lib_to, n))
         shutil.copy(os.path.join(ffmpeg, 'LICENSE.txt'), os.path.join(lib_to, 'FFmpeg LICENSE.txt'))
-        shutil.copy(os.path.join(d, 'game.elf'), os.path.join(new, 'game.elf'))
         with open(os.path.join(new, 'game.txt'), 'w') as f:
-            f.write(f'id {game}\n' + ''.join(f'{k} {v}\n' for k, v in psp_settings(d).items()))
-        say(event='packaging', id='disc')
-        shutil.copy(info['rom'], os.path.join(new, 'game.iso'))
+            f.write(psp_game_txt(game, d))
+        with open(os.path.join(new, 'Put your disc here.txt'), 'w', newline='\r\n' if system == 'windows' else '\n') as f:
+            f.write(PSP_README.format(name=name, game=game) + psp_dump_note(game, info['rom']))
         os.makedirs(out, exist_ok=True)
         if os.path.exists(folder):
             shutil.rmtree(folder)
@@ -479,10 +500,13 @@ def package_psp_pc(info, game, name, out, d, system):
 
 
 def package_psp_mac(info, game, name, out, d):
-    """A Mac app holding the PSP player, the game's program and its disc."""
+    """A Mac app holding the PSP player and the game's recompiled code. The user's disc goes beside it."""
     if not os.path.exists(os.path.join(d, 'play_metal')):
         fail('This game has not been compiled yet.')
-    env = psp_settings(d)
+    sys.path.insert(0, os.path.join(REPO, 'tools'))
+    import psp_game
+    say(event='packaging', id='runtime')
+    psp_game.link(d)                    # the player, current with the runtime
     app = os.path.join(out, name + '.app')
     work = tempfile.mkdtemp(prefix='genexia-package')
     try:
@@ -499,16 +523,12 @@ def package_psp_mac(info, game, name, out, d):
         say(event='packaging', id='assemble')
         exe = os.path.join(macos, 'play_metal')
         shutil.copy(os.path.join(d, 'play_metal'), exe)
-        shutil.copy(os.path.join(d, 'game.elf'), os.path.join(res, 'game.elf'))
-        shutil.copy(info['rom'], os.path.join(res, 'game.iso'))
+        with open(os.path.join(res, 'game.txt'), 'w') as f:
+            f.write(psp_game_txt(game, d))
         bundle_dylibs(exe, os.path.join(new, 'Contents/Frameworks'))
-        launch = os.path.join(macos, 'launch')
-        with open(launch, 'w') as f:
-            f.write(PSP_LAUNCH % (game, game, ''.join(f'export {k}={v}\n' for k, v in env.items())))
-        os.chmod(launch, 0o755)
         with open(os.path.join(new, 'Contents/Info.plist'), 'wb') as f:
             plist = {
-                'CFBundleExecutable': 'launch',
+                'CFBundleExecutable': 'play_metal',
                 'CFBundleIdentifier': 'local.genexia.game.' + game,
                 'CFBundleName': name,
                 'CFBundleDisplayName': name,
