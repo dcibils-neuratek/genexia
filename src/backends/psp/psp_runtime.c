@@ -54,7 +54,7 @@ u32 psp_trap(u32 pc, u32 inst) { static char t[64]; snprintf(t, sizeof t, "trap 
 /* --------------------------------------------------------------- threads */
 enum { FREE, READY, WAIT_TIME, WAIT_SEMA, WAIT_FLAG, WAIT_SLEEP, WAIT_END, DONE };
 typedef struct {
-    int state, prio, id, need, mode, wakeups, intr_off; u32 out, stack, stack_size; u64 until; int timed; char name[32];
+    int state, prio, id, need, mode, wakeups, intr_off; u32 out, stack, stack_size, entry; u64 until; int timed; char name[32];
     PspCpu cpu;
 } Thread;
 #define MAX_THREADS 64
@@ -88,7 +88,7 @@ static int new_thread(const char *name, u32 entry, int prio, u32 stack) {
         snprintf(t->name, sizeof t->name, "%s", name);
         t->state = DONE;                    /* dormant until started */
         t->prio = prio;
-        t->cpu.pc = entry;
+        t->cpu.pc = t->entry = entry;
         t->stack_size = stack ? stack : 0x40000;
         t->stack = stack_for(t->stack_size);
         const u32 top = t->stack + t->stack_size;
@@ -252,7 +252,32 @@ static int dialog = -1;
 static u32 psmf_status, vcount, fb_addr, fb_stride, fb_fmt, ge_lists;
 static u32 blocks_alloc[1024][2]; static int nalloc;
 static u32 uid_alloc(u32 addr, u32 size) { blocks_alloc[nalloc][0] = addr; blocks_alloc[nalloc][1] = size; return 0x2000 + nalloc++; }
+/* Fixed-size pools. Games build their own heaps on these (Tekken 6 puts its battle data in one), so a pool
+   has to hand out real memory. A deleted pool's memory goes back to a short free list for the next one. */
+static struct { u32 addr, bsize, count, used, region; } fpl[32];
+static u32 fpl_free[32][2]; static int nfpl_free;
+static u32 fpl_memory(u32 n, u32 *region) {
+    for (int i = 0; i < nfpl_free; i++) if (fpl_free[i][1] >= n) { const u32 a = fpl_free[i][0]; *region = fpl_free[i][1]; nfpl_free--; fpl_free[i][0] = fpl_free[nfpl_free][0]; fpl_free[i][1] = fpl_free[nfpl_free][1]; return a; }
+    if (stack_top - heap < n + 0x10000) return 0;              /* leave the thread stacks their room */
+    *region = n; return alloc_low(n);
+}
 static u64 next_vblank(void) { const u64 f = 16683; return (now_us / f + 1) * f - now_us; }
+
+/* the clock counts microseconds from the year 1, as the PSP's does */
+static u64 rtc_base;
+static u64 rtc_now(void) { if (!rtc_base) rtc_base = ((u64)time(NULL) + 62135596800ULL) * 1000000; return rtc_base + now_us; }
+static s64 days_from_civil(s64 y, int m, int d) { y -= m <= 2; const s64 era = (y >= 0 ? y : y - 399) / 400; const s64 yoe = y - era * 400; const s64 doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1; return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468; }
+static void rtc_to_date(u32 a, u64 tick) {
+    const s64 us = (s64)(tick % 1000000), secs = (s64)(tick / 1000000) - 62135596800LL;
+    s64 z = (secs >= 0 ? secs : secs - 86399) / 86400; const s64 sod = secs - z * 86400;
+    z += 719468; const s64 era = (z >= 0 ? z : z - 146096) / 146097, doe = z - era * 146097, yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const s64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153, d = doy - (153 * mp + 2) / 5 + 1, m = mp + (mp < 10 ? 3 : -9), y = yoe + era * 400 + (m <= 2);
+    WR16(a, (u16)y); WR16(a + 2, (u16)m); WR16(a + 4, (u16)d); WR16(a + 6, (u16)(sod / 3600)); WR16(a + 8, (u16)(sod / 60 % 60)); WR16(a + 10, (u16)(sod % 60)); WR32(a + 12, (u32)us);
+}
+static u64 rtc_from_date(u32 a) {
+    const s64 days = days_from_civil(RD16(a), RD16(a + 2), RD16(a + 4));
+    return (u64)((days * 86400 + RD16(a + 6) * 3600 + RD16(a + 8) * 60 + RD16(a + 10) + 62135596800LL) * 1000000 + RD32(a + 12));
+}
 
 static void hle(int i) {
     const char *n = imports[i].name;
@@ -263,12 +288,20 @@ static void hle(int i) {
     if (imports[i].nid == 0xEBD177D6u) { clock_pll = A0; clock_cpu = A1; clock_bus = A2; return; }   /* the 3-argument clock set */
     if (!n) return;
 #define IS(s) (!strcmp(n, s))
-    if (IS("sceKernelCreateThread")) { const int t = new_thread(gstr(A0), A1, (int)A2, A3); RET(t < 0 ? 0x80020064u : (u32)UID(t)); fprintf(lg, "thread %s entry %08X prio %d\n", gstr(A0), A1, (int)A2); }
+    if (IS("sceKernelCreateThread")) { const int t = new_thread(gstr(A0), A1, (int)A2, A3); RET(t < 0 ? 0x80020064u : (u32)UID(t)); fprintf(lg, "thread %s entry %08X prio %d stack %08X+%X (heap at %08X)\n", gstr(A0), A1, (int)A2, t < 0 ? 0 : th[t].stack, A3, heap); }
     else if (IS("sceKernelStartThread")) {
         const int t = TID(A0);
         if (t < 0 || t >= MAX_THREADS) { RET(ERR_NOT_FOUND); return; }
         const u32 n2 = A1, src = A2;
         Thread *d = &th[t];
+        if (d->state == DONE) {                 /* a thread that ran and exited starts over from its entry */
+            const u32 gp = d->cpu.r[28];
+            memset(&d->cpu, 0, sizeof d->cpu);
+            d->cpu.pc = d->entry; d->cpu.r[28] = gp; d->cpu.r[31] = IDLE_PC;
+            d->cpu.r[29] = (d->stack + d->stack_size - 0x100) & ~15u;
+            d->cpu.vctl[0] = d->cpu.vctl[1] = 0xE4;
+            d->wakeups = 0; d->timed = 0;
+        }
         u32 sp = d->cpu.r[29];
         if (n2 && src) { sp = (sp - n2 - 16) & ~15u; memcpy(M(sp), M(src), n2); d->cpu.r[5] = sp; d->cpu.r[29] = sp - 32; }
         d->cpu.r[4] = n2; d->state = READY;
@@ -338,6 +371,31 @@ static void hle(int i) {
     else if (IS("sceKernelAllocPartitionMemory")) { const u32 a = A2 == 1 ? alloc_high(A3) : alloc_low(A3); RET(uid_alloc(a, A3)); fprintf(lg, "alloc %s %u bytes at %08X\n", gstr(A1), A3, a); }
     else if (IS("sceKernelGetBlockHeadAddr")) RET(blocks_alloc[(A0 - 0x2000) & 1023][0]);
     else if (IS("sceKernelMaxFreeMemSize") || IS("sceKernelTotalFreeMemSize")) RET(stack_top - heap);
+    else if (IS("sceKernelCreateFpl")) {
+        const u32 bsize = (A3 + 63) & ~63u, count = T0 ? T0 : 1;
+        int i = 0; while (i < 32 && fpl[i].addr) i++;
+        u32 region = 0; const u32 a = i < 32 && count <= 32 ? fpl_memory(bsize * count, &region) : 0;
+        if (!a) RET(0x800200D9u);                                  /* no memory */
+        else { fpl[i].addr = a; fpl[i].bsize = bsize; fpl[i].count = count; fpl[i].used = 0; fpl[i].region = region; RET(0x3000 + i); }
+        fprintf(lg, "fpl %s: %u x %u bytes at %08X\n", gstr(A0), count, bsize, a);
+    }
+    else if (IS("sceKernelAllocateFpl") || IS("sceKernelTryAllocateFpl")) {
+        const u32 i = (A0 - 0x3000) & 31; u32 k = 0;
+        while (k < fpl[i].count && (fpl[i].used >> k & 1)) k++;
+        if (!fpl[i].addr) RET(0x8002019Au);
+        else if (k == fpl[i].count) RET(0x800201A3u);              /* pool empty: nobody frees while we'd wait */
+        else { fpl[i].used |= 1u << k; if (A1) WR32(A1, fpl[i].addr + k * fpl[i].bsize); RET(0); }
+    }
+    else if (IS("sceKernelFreeFpl")) {
+        const u32 i = (A0 - 0x3000) & 31;
+        if (fpl[i].addr && A1 >= fpl[i].addr && fpl[i].bsize) fpl[i].used &= ~(1u << ((A1 - fpl[i].addr) / fpl[i].bsize));
+        RET(0);
+    }
+    else if (IS("sceKernelDeleteFpl")) {
+        const u32 i = (A0 - 0x3000) & 31;
+        if (fpl[i].addr && nfpl_free < 32) { fpl_free[nfpl_free][0] = fpl[i].addr; fpl_free[nfpl_free++][1] = fpl[i].region; }
+        fpl[i].addr = 0; RET(0);
+    }
     else if (IS("sceIoOpen") || IS("sceIoOpenAsync")) {
         const int f = file_open(gstr(A0));
         fprintf(lg, "open %s = %d\n", gstr(A0), f);
@@ -474,6 +532,11 @@ static void hle(int i) {
         if (T0) WR32(T0, a ? atrac_remain(a) : 0);
         RET(made >> 31 ? made : 0);
     }
+    else if (IS("sceUtilityGetSystemParamInt")) {        /* English, cross confirms, everything else at its default */
+        const u32 v = A0 == 8 ? 1 : A0 == 9 ? 1 : 0;
+        if (A1) WR32(A1, v);
+        fprintf(lg, "system param %u = %u\n", A0, v);
+    }
     else if (IS("__sceSasGetEndFlag")) RET(sas_end_flags());
     else if (IS("__sceSasInit")) { sas_grain = (int)A1; }
     else if (IS("__sceSasCore")) sas_mix(A1);
@@ -507,7 +570,15 @@ static void hle(int i) {
     else if (IS("sceUtilityMsgDialogShutdownStart")) dialog = 4;
     else if (IS("sceKernelGetSystemTimeLow") || IS("sceKernelLibcClock")) RET(now_us);
     else if (IS("sceKernelGetSystemTimeWide")) { RET(now_us); p.r[3] = (u32)(now_us >> 32); }
-    else if (IS("sceRtcGetCurrentTick")) { WR32(A0, (u32)now_us); WR32(A0 + 4, (u32)(now_us >> 32)); }
+    else if (IS("sceRtcGetCurrentTick")) { const u64 k = rtc_now(); WR32(A0, (u32)k); WR32(A0 + 4, (u32)(k >> 32)); }
+    else if (IS("sceRtcTickAddTicks") || IS("sceRtcTickAddMicroseconds") || IS("sceRtcTickAddSeconds") || IS("sceRtcTickAddMinutes") || IS("sceRtcTickAddHours") || IS("sceRtcTickAddDays")) {
+        const s64 count = (s64)((u64)A3 << 32 | A2);
+        const s64 unit = IS("sceRtcTickAddSeconds") ? 1000000 : IS("sceRtcTickAddMinutes") ? 60000000LL : IS("sceRtcTickAddHours") ? 3600000000LL : IS("sceRtcTickAddDays") ? 86400000000LL : 1;
+        const u64 k = ((u64)RD32(A1 + 4) << 32 | RD32(A1)) + (u64)(count * unit);
+        WR32(A0, (u32)k); WR32(A0 + 4, (u32)(k >> 32));
+    }
+    else if (IS("sceRtcSetTick")) rtc_to_date(A0, (u64)RD32(A1 + 4) << 32 | RD32(A1));
+    else if (IS("sceRtcGetTick")) { const u64 k = rtc_from_date(A0); WR32(A1, (u32)k); WR32(A1 + 4, (u32)(k >> 32)); }
     else if (IS("sceRtcGetTickResolution")) RET(1000000);
     else if (IS("sceGeEdramGetAddr")) RET(0x04000000);
     else if (IS("sceGeEdramGetSize")) RET(0x200000);
@@ -781,6 +852,8 @@ int main(int argc, char **argv) {
     const clock_t start = clock();
     const u32 brk = getenv("PSP_BREAK") ? strtoul(getenv("PSP_BREAK"), NULL, 16) : 0; int brk_n = 0;
     const u64 brk_after = getenv("PSP_AFTER") ? strtoull(getenv("PSP_AFTER"), NULL, 10) * 1000000 : 0;
+    u32 *prof = getenv("PSP_PROFILE") ? calloc(CODE_SLOTS, 4) : NULL;
+    u32 *trace = getenv("PSP_TRACE") ? calloc(64, 4) : NULL, ntrace = 0;
     while (!stop_reason) {
         const u32 pc = p.pc;
         if (pc == IDLE_PC) { th[cur].state = DONE; schedule(); continue; }
@@ -792,6 +865,8 @@ int main(int argc, char **argv) {
         const u32 slot = (pc - CODE_BASE) >> 2;
         if (slot >= CODE_SLOTS) { static char t[64]; snprintf(t, sizeof t, "jump outside the program: %08X, ra %08X", pc, p.r[31]); stop_reason = t; break; }
         if (import_of[slot]) { p.pc = p.r[31]; hle(import_of[slot] - 1); if (urgent_due()) schedule(); continue; }
+        if (prof && now_us > brk_after && !strcmp(th[cur].name, "user_main")) prof[slot]++;
+        if (trace) trace[ntrace++ & 63] = pc;   /* last blocks run, for PSP_TRACE */
         if (pc == brk && brk_n < 30 && now_us > brk_after) {
             brk_n++;
             fprintf(lg, "break %08X t %.2f thread %s v0 %08X v1 %08X a0 %08X a1 %08X a2 %08X a3 %08X s0 %08X s1 %08X ra %08X sp %08X\n", pc, now_us / 1e6, th[cur].name, p.r[2], p.r[3], A0, A1, A2, A3, p.r[16], p.r[17], p.r[31], p.r[29]);
@@ -818,6 +893,7 @@ int main(int argc, char **argv) {
         }
     }
     fflush(lg);
+    if (trace) { printf("last blocks:"); for (u32 k = 0; k < 64; k++) printf(" %08X", trace[(ntrace + k) & 63]); printf("\n"); }
     printf("\nstopped: %s\nthread %s, pc %08X\n%llu blocks, %.2f virtual seconds, %u vblanks, %u GE lists, frame buffer %08X stride %u format %u\n",
            stop_reason, th[cur].name, p.pc, (unsigned long long)ran, now_us / 1e6, vcount, ge_lists, fb_addr, fb_stride, fb_fmt);
     for (int i = 0; i < MAX_THREADS; i++) if (th[i].state != FREE)
@@ -830,7 +906,15 @@ int main(int argc, char **argv) {
         if (ti < 0x08B00000 || ti > 0x08C00000 || (ti & 3)) continue;
         const u32 nm = RD32(ti + 4);
         if (nm < 0x08B00000 || nm > 0x08C00000 || RD8(nm) < '0' || RD8(nm) > '9') continue;
+        if (!strncmp((const char *)M(nm), "7state_t", 8)) { printf("state %08X %.60s:", o, (const char *)M(nm)); for (int k = 1; k < 8; k++) printf(" %08X", RD32(o + k * 4)); printf("\n"); continue; }
         printf("obj %08X %.48s  +64 %08X +68 %08X +116 %08X +180 %08X +196 %08X\n", o, (const char *)M(nm), RD32(o + 64), RD32(o + 68), RD32(o + 116), RD32(o + 180), RD32(o + 196));
+    }
+    if (prof) { FILE *f = fopen(getenv("PSP_PROFILE"), "w"); for (u32 i = 0; i < CODE_SLOTS; i++) if (prof[i]) fprintf(f, "%08X %u\n", CODE_BASE + i * 4, prof[i]); fclose(f); }
+    if (getenv("PSP_RAM")) { FILE *f = fopen(getenv("PSP_RAM"), "wb"); fwrite(M(0x08000000), 1, 0x2000000, f); fclose(f); }   /* all of user RAM, for offline digging */
+    for (const char *d = getenv("PSP_DUMP"); d && *d; d += strcspn(d, ",") + (d[strcspn(d, ",")] == ',')) {   /* PSP_DUMP=addr[,addr...] */
+        const u32 a = strtoul(d, NULL, 16);
+        for (u32 k = 0; k < 0x400; k += 4) printf("%s%08X ", k % 32 ? "" : k ? "\ndump " : "\ndump-at ", RD32(a + k));
+        printf("\n");
     }
     int named = 0, unnamed = 0;
     for (int i = 0; i < nimports; i++) if (imports[i].calls) { if (imports[i].name) named++; else unnamed++; }
